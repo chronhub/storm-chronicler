@@ -1,0 +1,177 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Storm\Chronicler\Console;
+
+use Doctrine\DBAL\Exception;
+use Override;
+use Storm\Chronicler\Store\EventStorePartitioner;
+use Storm\Contracts\Aggregate\AggregateIdentity;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Style\SymfonyStyle;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
+
+/**
+ * Create/verify per-category LIST partitions of `event_store`, splitting a known category out of the
+ * `event_store_default` catch-all into its own child `event_store_p_<category>`.
+ *
+ * Categories come from config, never the CLI: `storm.event_store_partition_list`, the explicit,
+ * DDD-known set, and, when `storm.autodiscover_partition_per_category` is on, the categories of the
+ * registered aggregates, a convenience, NOT best practice, since a partition is not necessarily an
+ * aggregate.
+ *
+ * `--verify-only` checks each child exists and is attached with the right LIST bound, creating
+ * nothing. Otherwise, it creates each, idempotently via a simple `CREATE TABLE … PARTITION OF`, then
+ * verifies.
+ *
+ * Postgres REJECTS a simple split when `event_store_default` still holds the category's rows; it does
+ * not migrate them. So a category with DEFAULT volume is refused and marked NEEDS MIGRATION, not
+ * auto-migrated: the command prints the manual recipe the operator runs, which creates a standalone
+ * table, moves the rows, then ATTACHes it under an ACCESS EXCLUSIVE lock. Provision EARLY, while the
+ * DEFAULT is empty; in a design that provisioned its categories up front, this never fires.
+ *
+ * Examples:
+ *
+ * ```bash
+ * bin/console storm:event-store:partition
+ * bin/console storm:event-store:partition --verify-only
+ * ```
+ */
+#[AsCommand(name: 'storm:event-store:partition', description: 'Create/verify per-category event_store partitions from config.')]
+final class EventStorePartitionCommand extends Command
+{
+    /**
+     * @param  list<string>  $partitionList
+     * @param  array<class-string, array{id: class-string<AggregateIdentity>, category: string, snapshot?: array{threshold: int, max_age_seconds?: int|null, min_interval_seconds?: int|null}}>  $aggregates
+     */
+    public function __construct(
+        private readonly EventStorePartitioner $partitioner,
+        #[Autowire('%storm.event_store_partition_list%')]
+        private readonly array $partitionList,
+        #[Autowire('%storm.autodiscover_partition_per_category%')]
+        private readonly bool $autodiscover,
+        #[Autowire('%storm.aggregates%')]
+        private readonly array $aggregates,
+    ) {
+        parent::__construct();
+    }
+
+    #[Override]
+    protected function configure(): void
+    {
+        $this->addOption('verify-only', null, InputOption::VALUE_NONE, 'Verify the partitions/bounds exist; create nothing');
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @throws Exception on a DBAL failure of a create / verify / count
+     */
+    #[Override]
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $io = new SymfonyStyle($input, $output);
+        $verifyOnly = $input->getOption('verify-only') === true;
+
+        $categories = $this->resolveCategories();
+
+        if ($categories === []) {
+            // Partitioning is opt-in: with nothing configured, every category stays in event_store_default.
+            // A no-op, not an error, so the command is safe to call unconditionally from an installation step.
+            $io->info('No partition categories configured (storm.event_store_partition_list / autodiscover_partition_per_category) — every category uses event_store_default.');
+
+            return Command::SUCCESS;
+        }
+
+        $io->title(sprintf('Event-store partitions%s', $verifyOnly ? ' (verify only)' : ''));
+
+        $allOk = true;
+
+        foreach ($categories as $category) {
+            if (! $verifyOnly && ! $this->provision($io, $category)) {
+                $io->writeln(sprintf('  %-30s <error>NEEDS MIGRATION</error>', $category));
+                $allOk = false;
+
+                continue;
+            }
+
+            $ok = $this->partitioner->verify($category);
+            $io->writeln(sprintf('  %-30s %s', $category, $ok ? '<info>OK</info>' : '<error>FAILED</error>'));
+            $allOk = $allOk && $ok;
+        }
+
+        if (! $allOk) {
+            $io->error('One or more partitions are missing, not attached, or need a manual migration (see above).');
+
+            return Command::FAILURE;
+        }
+
+        $io->success('Event-store partitions are ready.');
+
+        return Command::SUCCESS;
+    }
+
+    /**
+     * Create the category's partition with a simple `CREATE TABLE … PARTITION OF`. Returns false when
+     * the DEFAULT still holds the category's rows, since Postgres rejects the split there, so the
+     * command prints the manual migration recipe instead of attempting a doomed creation.
+     *
+     * @throws Exception on a DBAL failure
+     */
+    private function provision(SymfonyStyle $io, string $category): bool
+    {
+        $volume = $this->partitioner->defaultVolumeFor($category);
+
+        if ($volume > 0) {
+            $volume
+                |> number_format(...)
+                |> (static fn ($x) => sprintf("Category '%s' has %s row(s) in event_store_default — Postgres rejects a simple split (it does not migrate them). ".'Migrate manually (under an ACCESS EXCLUSIVE lock — appends blocked — preferably off-peak), then re-run:', $category, $x))
+                |> $io->warning(...);
+            $io->writeln($this->migrationRecipe($category));
+
+            return false;
+        }
+
+        $this->partitioner->createPartitions([$category]);
+
+        return true;
+    }
+
+    /**
+     * The manual split the operator runs when a category already has DEFAULT volume: stage a standalone
+     * table, move the rows out of the DEFAULT, then ATTACH it as the partition. One transaction, ACCESS
+     * EXCLUSIVE on the parent at ATTACH; the parent's partitioned PK, UNIQUE, and index attach with it.
+     */
+    private function migrationRecipe(string $category): string
+    {
+        return implode("\n", [
+            '  BEGIN;',
+            // INCLUDING CONSTRAINTS is load-bearing: without it the child misses the parent's
+            // CHECK constraint event_store_cat_stream_chk and the ATTACH is refused.
+            sprintf('  CREATE TABLE event_store_p_%s (LIKE event_store INCLUDING DEFAULTS INCLUDING CONSTRAINTS);', $category),
+            sprintf("  WITH moved AS (DELETE FROM event_store_default WHERE category = '%s' RETURNING *)", $category),
+            sprintf('  INSERT INTO event_store_p_%s SELECT * FROM moved;', $category),
+            sprintf("  ALTER TABLE event_store ATTACH PARTITION event_store_p_%s FOR VALUES IN ('%s');", $category, $category),
+            '  COMMIT;',
+        ]);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function resolveCategories(): array
+    {
+        $categories = $this->partitionList;
+
+        if ($this->autodiscover) {
+            $categories = array_merge($categories, array_column($this->aggregates, 'category'));
+        }
+
+        return array_values(array_unique($categories));
+    }
+}
