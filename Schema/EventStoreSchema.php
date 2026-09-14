@@ -78,6 +78,7 @@ use Storm\Chronicler\Store\StreamReader;
  * their own schema class, one table per file for cleaner future migrations; Ledger aggregates them all.
  *
  * @see SequencePosition
+ * @see StreamReader::committedHeadPosition()
  * @see StreamReader::safeHeadPosition()
  * @see SafeHeadAdvancer
  * @see StreamHeadsSchema
@@ -128,12 +129,13 @@ final class EventStoreSchema
             // The correlation point-lookup, serving the correlation_trace recipe, drill-down and
             // forensics. The key literal is Header::CorrelationId's wire value.
             //
-            // A consumer only rides it by writing the SAME expression: the `#>>` path form below, or
-            // the `#>> string_to_array(:p, ',')` the inspect filter binds, which the planner resolves
-            // to it. The `->>` key form returns identical text and matches NOTHING here, so a query
-            // written that way scans the whole store and no result ever looks wrong. A comparison
-            // against a column pinned `COLLATE "C"` misses it the same way, resolving to a collation
-            // this index is not built under; collate to the side whose index must serve.
+            // A fixed-path consumer rides it in every planner mode by writing the SAME literal
+            // expression. The inspect filter cannot do that because its path is caller-provided; its
+            // `#>> string_to_array(:p, ',')` form matches only when a custom plan folds the binding.
+            // The `->>` key form returns identical text and matches NOTHING here, so a query written
+            // that way scans the whole store and no result ever looks wrong. A comparison against a
+            // column pinned `COLLATE "C"` misses it the same way, resolving to a collation this index
+            // is not built under; collate to the side whose index must serve.
             /** @lang PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS event_store_correlation_idx ON event_store ((header #>> '{__correlation_id}'))

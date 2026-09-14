@@ -6,6 +6,7 @@ namespace Storm\Chronicler\Console;
 
 use Doctrine\DBAL\Exception;
 use Override;
+use RuntimeException;
 use Storm\Chronicler\Store\EventStorePartitioner;
 use Storm\Contracts\Aggregate\AggregateIdentity;
 use Symfony\Component\Console\Attribute\AsCommand;
@@ -18,7 +19,7 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
  * Create/verify per-category LIST partitions of `event_store`, splitting a known category out of the
- * `event_store_default` catch-all into its own child `event_store_p_<category>`.
+ * `event_store_default` catch-all into its own child with a bounded physical name.
  *
  * Categories come from config, never the CLI: `storm.event_store_partition_list`, the explicit,
  * DDD-known set, and, when `storm.autodiscover_partition_per_category` is on, the categories of the
@@ -26,7 +27,7 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
  * aggregate.
  *
  * `--verify-only` checks each child exists and is attached with the right LIST bound, creating
- * nothing. Otherwise, it creates each, idempotently via a simple `CREATE TABLE … PARTITION OF`, then
+ * nothing. Otherwise, it adopts correctly bound children or creates missing partitions, then
  * verifies.
  *
  * Postgres REJECTS a simple split when `event_store_default` still holds the category's rows; it does
@@ -70,6 +71,7 @@ final class EventStorePartitionCommand extends Command
     /**
      * {@inheritDoc}
      *
+     * @throws RuntimeException when a partition name is occupied or cannot fit the server limit
      * @throws Exception on a DBAL failure of a create / verify / count
      */
     #[Override]
@@ -121,6 +123,7 @@ final class EventStorePartitionCommand extends Command
      * the DEFAULT still holds the category's rows, since Postgres rejects the split there, so the
      * command prints the manual migration recipe instead of attempting a doomed creation.
      *
+     * @throws RuntimeException when a partition name is occupied or cannot fit the server limit
      * @throws Exception on a DBAL failure
      */
     private function provision(SymfonyStyle $io, string $category): bool
@@ -146,17 +149,22 @@ final class EventStorePartitionCommand extends Command
      * The manual split the operator runs when a category already has DEFAULT volume: stage a standalone
      * table, move the rows out of the DEFAULT, then ATTACH it as the partition. One transaction, ACCESS
      * EXCLUSIVE on the parent at ATTACH; the parent's partitioned PK, UNIQUE, and index attach with it.
+     *
+     * @throws RuntimeException when the partition name cannot fit the server limit
+     * @throws Exception on a DBAL failure
      */
     private function migrationRecipe(string $category): string
     {
+        $name = $this->partitioner->partitionName($category);
+
         return implode("\n", [
             '  BEGIN;',
             // INCLUDING CONSTRAINTS is load-bearing: without it the child misses the parent's
             // CHECK constraint event_store_cat_stream_chk and the ATTACH is refused.
-            sprintf('  CREATE TABLE event_store_p_%s (LIKE event_store INCLUDING DEFAULTS INCLUDING CONSTRAINTS);', $category),
+            sprintf('  CREATE TABLE %s (LIKE event_store INCLUDING DEFAULTS INCLUDING CONSTRAINTS);', $name),
             sprintf("  WITH moved AS (DELETE FROM event_store_default WHERE category = '%s' RETURNING *)", $category),
-            sprintf('  INSERT INTO event_store_p_%s SELECT * FROM moved;', $category),
-            sprintf("  ALTER TABLE event_store ATTACH PARTITION event_store_p_%s FOR VALUES IN ('%s');", $category, $category),
+            sprintf('  INSERT INTO %s SELECT * FROM moved;', $name),
+            sprintf("  ALTER TABLE event_store ATTACH PARTITION %s FOR VALUES IN ('%s');", $name, $category),
             '  COMMIT;',
         ]);
     }

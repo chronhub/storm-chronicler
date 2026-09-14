@@ -27,6 +27,30 @@ use Storm\Serializer\DefaultMessageSerializer;
  */
 final class PersonalDataVeilTest extends TestCase
 {
+    #[Test]
+    public function an_absent_optional_field_does_not_expose_a_later_personal_field(): void
+    {
+        $event = Fixture\OptionalPersonalFieldsEvent::fromPayload(['customer_id' => 'cus-1', 'full_name' => 'Private Name']);
+        $declared = new ReflectionClass($event)->getAttributes(Personal::class)[0]->newInstance();
+        $veil = new PersonalDataVeil([$event::class => ['subject' => $declared->subject, 'keys' => $declared->keys, 'fallbacks' => $declared->fallback]]);
+        $record = new EventRecord(new Message($event), SequencePosition::fromInt(1), PointInTime::from('2026-07-29T10:00:00.000000Z'), ['customer_id' => 'cus-1', 'full_name' => 'v1:stored-envelope']);
+        self::assertSame(['customer_id' => 'cus-1', 'full_name' => 'v1:stored-envelope'], $veil->veil($record));
+    }
+
+    #[Test]
+    public function missing_personal_field_stays_absent(): void
+    {
+        $payload = ['customer_id' => 'cus-1', 'channel' => 'web'];
+        $record = new EventRecord(
+            new Message(PersonalUpcastEvent::fromPayload($payload)),
+            SequencePosition::fromInt(1),
+            PointInTime::from('2026-07-29T10:00:00.000000+00:00'),
+            $payload + ['full_name' => 'old stored value'],
+        );
+
+        self::assertSame($payload, new PersonalDataVeil($this->map())->veil($record));
+    }
+
     private FakeCipherKeyStore $keys;
 
     private CipheringMessageSerializer $serializer;

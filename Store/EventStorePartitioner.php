@@ -7,6 +7,7 @@ namespace Storm\Chronicler\Store;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use InvalidArgumentException;
+use RuntimeException;
 use Storm\Chronicler\Schema\EventStoreSchema;
 use Storm\Stream\StreamName;
 
@@ -16,7 +17,8 @@ use Storm\Stream\StreamName;
  *
  * The schema ships `event_store PARTITION BY LIST (category)` with a single `event_store_default`
  * catch-all, so any category writes out of the box. This splits a known category out of the DEFAULT
- * into its own child `event_store_p_<category>` so its rows no longer share the catch-all.
+ * into its own child so its rows no longer share the catch-all. Short names use
+ * `event_store_p_<category>`; longer names include a digest within the server identifier limit.
  *
  * It creates only the child table: the parent's PK `(category, sequence_no)`, the UNIQUE
  * `(category, stream, version)` and the `sequence_no` index are PARTITIONED indexes, so Postgres
@@ -42,11 +44,12 @@ final readonly class EventStorePartitioner
     ) {}
 
     /**
-     * Create the child partition for each category; idempotent via `IF NOT EXISTS` on the child name.
+     * Create missing category partitions; existing children are recognized by their LIST bound.
      *
      * @param  list<string>  $categories
      *
      * @throws InvalidArgumentException when a category is not a valid stream category matching `StreamName::CATEGORY_REGEX`, a config error
+     * @throws RuntimeException when the generated name is occupied or the identifier budget is too small
      * @throws Exception on a DBAL failure
      */
     public function createPartitions(array $categories): void
@@ -54,12 +57,24 @@ final readonly class EventStorePartitioner
         foreach ($categories as $category) {
             $category = $this->assertValidCategory($category);
 
-            // Identifier and value both come from the allowlisted category, so direct interpolation is safe;
-            // DDL cannot be parameterized anyway.
+            if ($this->existingPartition($category) !== false) {
+                continue;
+            }
+
+            $name = $this->partitionName($category);
+            $occupant = $this->connection->fetchOne(
+                "SELECT c.relkind::text || ' ' || COALESCE(pg_get_expr(c.relpartbound, c.oid), 'unpartitioned')
+                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = current_schema() AND c.relname = :name",
+                ['name' => $name],
+            );
+            if ($occupant !== false) {
+                throw new RuntimeException(sprintf('Partition name "%s" is occupied by %s; expected category "%s".', $name, $occupant, $category));
+            }
+
             $this->connection->executeStatement(sprintf(
-                /** @lang PostgreSQL */
-                "CREATE TABLE IF NOT EXISTS event_store_p_%s PARTITION OF event_store FOR VALUES IN ('%s')",
-                $category,
+                "CREATE TABLE %s PARTITION OF event_store FOR VALUES IN ('%s')",
+                $name,
                 $category,
             ));
         }
@@ -75,22 +90,54 @@ final readonly class EventStorePartitioner
     {
         $category = $this->assertValidCategory($category);
 
-        // the name and bound alone cannot certify: a table carrying both can hang from another
-        // partitioned parent, and the parent edge lives only in pg_inherits
-        $bound = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
-            'SELECT pg_get_expr(c.relpartbound, c.oid)
+        return $this->existingPartition($category) !== false;
+    }
+
+    /**
+     * Return the existing child name or the bounded name used for creation and manual migration.
+     *
+     * @throws InvalidArgumentException when the category is invalid
+     * @throws RuntimeException when the server identifier budget cannot hold the generated name
+     * @throws Exception on a DBAL failure
+     */
+    public function partitionName(string $category): string
+    {
+        $category = $this->assertValidCategory($category);
+        $existing = $this->existingPartition($category);
+        if ($existing !== false) {
+            return $existing;
+        }
+
+        $limit = (int) $this->connection->fetchOne("SELECT current_setting('max_identifier_length')::int");
+        $prefix = 'event_store_p_';
+        if (strlen($prefix.$category) <= $limit) {
+            return $prefix.$category;
+        }
+
+        $budget = $limit - strlen($prefix) - 9;
+        if ($budget < 1) {
+            throw new RuntimeException(sprintf('PostgreSQL identifier limit %d is too small for a category partition name.', $limit));
+        }
+
+        return $prefix.substr($category, 0, $budget).'_'.substr(hash('sha256', $category), 0, 8);
+    }
+
+    private function existingPartition(string $category): string|false
+    {
+        $name = $this->connection->fetchOne(
+            'SELECT c.relname::text
                FROM pg_class c
                JOIN pg_namespace n ON n.oid = c.relnamespace
                JOIN pg_inherits i ON i.inhrelid = c.oid
                JOIN pg_class p ON p.oid = i.inhparent
                JOIN pg_namespace pn ON pn.oid = p.relnamespace
-              WHERE n.nspname = current_schema() AND c.relname = :child
-                AND pn.nspname = current_schema() AND p.relname = :parent',
-            ['child' => 'event_store_p_'.$category, 'parent' => 'event_store'],
+              WHERE n.nspname = current_schema()
+                AND pn.nspname = current_schema() AND p.relname = :parent
+                AND pg_get_expr(c.relpartbound, c.oid) = :bound',
+            ['parent' => 'event_store', 'bound' => sprintf("FOR VALUES IN ('%s')", $category)],
         );
 
-        return is_string($bound) && str_contains($bound, sprintf("FOR VALUES IN ('%s')", $category));
+        return is_string($name) ? $name : false;
     }
 
     /**

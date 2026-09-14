@@ -14,13 +14,32 @@ use Storm\Chronicler\Store\EventStorePartitioner;
 final class EventStorePartitionerTest extends TestCase
 {
     #[Test]
+    public function the_physical_name_is_bounded_by_the_server_identifier_length(): void
+    {
+        $connection = $this->createMock(Connection::class);
+        $connection->method('fetchOne')->willReturnCallback(static fn (string $sql) => str_contains($sql, 'max_identifier_length') ? '32' : false);
+        $sql = '';
+        $connection->expects($this->once())->method('executeStatement')->willReturnCallback(static function (string $statement) use (&$sql): int {
+            $sql = $statement;
+
+            return 0;
+        });
+        new EventStorePartitioner($connection)->createPartitions([str_repeat('a', 80)]);
+        self::assertSame(1, preg_match('/CREATE TABLE (?:IF NOT EXISTS )?([a-z0-9_]+)/', $sql, $matches));
+        $name = $matches[1] ?? '';
+        self::assertNotSame('', $name);
+        self::assertLessThanOrEqual(32, strlen($name));
+    }
+
+    #[Test]
     public function it_creates_one_idempotent_list_partition_for_a_category_and_nothing_else(): void
     {
         $connection = $this->createMock(Connection::class);
+        $connection->method('fetchOne')->willReturnCallback(static fn (string $sql) => str_contains($sql, 'max_identifier_length') ? '63' : false);
         // Only the child table, no per-child index, since the parent's partitioned indexes propagate.
         $connection->expects($this->once())
             ->method('executeStatement')
-            ->with("CREATE TABLE IF NOT EXISTS event_store_p_account PARTITION OF event_store FOR VALUES IN ('account')")
+            ->with("CREATE TABLE event_store_p_account PARTITION OF event_store FOR VALUES IN ('account')")
             ->willReturn(0);
 
         new EventStorePartitioner($connection)->createPartitions(['account']);
@@ -88,10 +107,9 @@ final class EventStorePartitionerTest extends TestCase
     {
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->once())->method('fetchOne')
-            // both bound params are pinned: the child name is what the probe looks up, and the parent
-            // is the edge that keeps a same-named child of another table from certifying
-            ->with($this->anything(), ['child' => 'event_store_p_account', 'parent' => 'event_store'])
-            ->willReturn("FOR VALUES IN ('account')");
+            // Parent and full bound identify the child independently of its physical name.
+            ->with($this->anything(), ['parent' => 'event_store', 'bound' => "FOR VALUES IN ('account')"])
+            ->willReturn('event_store_p_account');
 
         self::assertTrue(new EventStorePartitioner($connection)->verify('account'));
     }
@@ -114,7 +132,7 @@ final class EventStorePartitionerTest extends TestCase
         // category's rows. The class documents the hand recipe that produces it, a detach and
         // reattach where the FOR VALUES clause is typed by an operator mid-incident.
         $connection = $this->createStub(Connection::class);
-        $connection->method('fetchOne')->willReturn("FOR VALUES IN ('accounts')");
+        $connection->method('fetchOne')->willReturn(false);
 
         self::assertFalse(new EventStorePartitioner($connection)->verify('account'));
     }

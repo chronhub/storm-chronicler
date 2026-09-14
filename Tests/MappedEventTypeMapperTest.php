@@ -18,6 +18,17 @@ use Storm\Chronicler\Tests\Fixture\SomethingHappened;
 final class MappedEventTypeMapperTest extends TestCase
 {
     #[Test]
+    public function scanned_unannotated_event_keeps_fqcn_identity(): void
+    {
+        $mapper = new MappedEventTypeMapper([SomethingHappened::class, AliasedEvent::class]);
+
+        self::assertSame(SomethingHappened::class, $mapper->toType(SomethingHappened::class));
+        self::assertSame(SomethingHappened::class, $mapper->toClass(SomethingHappened::class));
+        self::assertSame([SomethingHappened::class], $mapper->storedTypesOf(SomethingHappened::class));
+        self::assertSame(AliasedEvent::class, $mapper->toClass('test.aliased'));
+    }
+
+    #[Test]
     public function to_type_returns_the_canonical_alias_for_an_attributed_class(): void
     {
         $mapper = new MappedEventTypeMapper([AliasedEvent::class]);

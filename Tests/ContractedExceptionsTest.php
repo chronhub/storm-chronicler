@@ -161,13 +161,7 @@ final class ContractedExceptionsTest extends TestCase
      */
     private static function carriesAContract(string $type): bool
     {
-        foreach (class_implements($type) ?: [] as $interface) {
-            if (str_starts_with($interface, 'Storm\\Contracts\\')) {
-                return true;
-            }
-        }
-
-        return false;
+        return array_any(class_implements($type) ?: [], fn ($interface) => str_starts_with($interface, 'Storm\\Contracts\\'));
     }
 
     /**

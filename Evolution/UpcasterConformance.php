@@ -20,7 +20,7 @@ use Storm\Contracts\Message\DomainEvent;
  * The floor needs no declaration: it is computed from the data, `min(event_version)` per stored
  * type. A version bump without an upcaster is a legitimate posture as long as no row of the older
  * shape exists, the reset-based dev workflow; the moment such a row DOES exist, this check names
- * the missing steps. Four failure families are reported:
+ * the missing steps. Five failure families are reported:
  *
  * - A stored type no declared class resolves, so its rows are unreadable outright;
  *
@@ -29,7 +29,10 @@ use Storm\Contracts\Message\DomainEvent;
  *
  * - Rows stored ABOVE the runtime's version, a rolled-back binary reading a future schema;
  *
- * - Chain gaps or duplicate step owners between the stored floor and the current version.
+ * - Chain gaps or duplicate step owners between the stored floor and the current version;
+ *
+ * - An upcaster whose own probe threw, so the chain cannot say what it owns and the steps of that
+ *   type go unjudged.
  *
  * The families the reader refuses on and the families this reports must stay the same set, in both
  * directions: a verdict this omits ships a store the reader will reject row by row, and a verdict
@@ -57,12 +60,25 @@ final readonly class UpcasterConformance
      */
     public function problems(Connection $connection): array
     {
+        return array_map(static fn (ConformanceAnomaly $anomaly): string => $anomaly->problem, $this->anomalies($connection));
+    }
+
+    /**
+     * The same interrogation typed, one entry per problem and in that same order: the kind a
+     * deployment gate branches on, beside the phrase an operator reads.
+     *
+     * @return list<ConformanceAnomaly> empty when every stored row is readable
+     *
+     * @throws Exception on a DBAL failure of the aggregation query
+     */
+    public function anomalies(Connection $connection): array
+    {
         /** @var list<array{type: string, floor: int|string, ceiling: int|string, n: int|string}> $stored */
         $stored = $connection->fetchAllAssociative(
             'SELECT type, min(event_version) AS floor, max(event_version) AS ceiling, count(*) AS n FROM event_store GROUP BY type ORDER BY type',
         );
 
-        return $this->verdicts($stored);
+        return $this->anomaliesOf($stored);
     }
 
     /**
@@ -74,7 +90,19 @@ final readonly class UpcasterConformance
      */
     public function verdicts(array $stored): array
     {
-        $problems = [];
+        return array_map(static fn (ConformanceAnomaly $anomaly): string => $anomaly->problem, $this->anomaliesOf($stored));
+    }
+
+    /**
+     * The typed pure half, the single place a verdict is decided; every other entry point here
+     * reads its answer, so the phrase and the kind can never disagree about the same store.
+     *
+     * @param  list<array{type: string, floor: int|string, ceiling: int|string, n: int|string}>  $stored
+     * @return list<ConformanceAnomaly>
+     */
+    public function anomaliesOf(array $stored): array
+    {
+        $anomalies = [];
 
         foreach ($stored as $row) {
             $type = $row['type'];
@@ -85,7 +113,10 @@ final readonly class UpcasterConformance
             try {
                 $class = $this->eventTypeMapper->toClass($type);
             } catch (UnknownEventType) {
-                $problems[] = sprintf('stored type "%s" (%d rows) resolves to no declared event class — those rows are unreadable', $type, $rows);
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: null, ceiling: $ceiling, kind: AnomalyKind::UnknownType,
+                    problem: sprintf('stored type "%s" (%d rows) resolves to no declared event class — those rows are unreadable', $type, $rows),
+                );
 
                 continue;
             }
@@ -95,7 +126,10 @@ final readonly class UpcasterConformance
                 // store holds domain events exclusively, so a row whose type resolves elsewhere is
                 // refused before its payload is hydrated. Reporting it here is what makes the
                 // verdict mean readable; the resolution alone only means the class LOADS
-                $problems[] = sprintf('stored type "%s" (%d rows) resolves to "%s", which is not a domain event — the read path refuses those rows before hydrating them', $type, $rows, $class);
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: null, ceiling: $ceiling, kind: AnomalyKind::NotAnEvent,
+                    problem: sprintf('stored type "%s" (%d rows) resolves to "%s", which is not a domain event — the read path refuses those rows before hydrating them', $type, $rows, $class),
+                );
 
                 continue;
             }
@@ -103,7 +137,10 @@ final readonly class UpcasterConformance
             $current = $this->eventTypeMapper->versionOf($class);
 
             if ($ceiling > $current) {
-                $problems[] = sprintf('stored type "%s" has rows at schema version %d but this runtime only knows version %d — roll the binary forward', $type, $ceiling, $current);
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::AboveRuntime,
+                    problem: sprintf('stored type "%s" has rows at schema version %d but this runtime only knows version %d — roll the binary forward', $type, $ceiling, $current),
+                );
             }
 
             // the audit polls the CANONICAL alias, exactly what the read path hands the chain after
@@ -115,20 +152,29 @@ final readonly class UpcasterConformance
             try {
                 $audit = $this->upcasters->audit($canonical, $floor, $current);
             } catch (UpcasterFailed $e) {
-                $problems[] = sprintf('stored type %s: %s', $label, $e->getMessage());
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::UpcasterFailed,
+                    problem: sprintf('stored type %s: %s', $label, $e->getMessage()),
+                );
 
                 continue;
             }
 
             foreach ($audit->missing as $step) {
-                $problems[] = sprintf('stored type %s (floor v%d, current v%d): no upcaster for the step v%d to v%d — rows below the gap are unreadable', $label, $floor, $current, $step, $step + 1);
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::MissingStep,
+                    problem: sprintf('stored type %s (floor v%d, current v%d): no upcaster for the step v%d to v%d — rows below the gap are unreadable', $label, $floor, $current, $step, $step + 1),
+                );
             }
 
             foreach ($audit->duplicated as $step) {
-                $problems[] = sprintf('stored type %s: more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order', $label, $step, $step + 1);
+                $anomalies[] = new ConformanceAnomaly(
+                    type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::DuplicatedStep,
+                    problem: sprintf('stored type %s: more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order', $label, $step, $step + 1),
+                );
             }
         }
 
-        return $problems;
+        return $anomalies;
     }
 }

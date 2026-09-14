@@ -8,12 +8,14 @@ use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Doctrine\DBAL\ParameterType;
+use Psr\Log\LoggerInterface;
 use Storm\Chronicler\Console\RelayOutboxCommand;
 use Storm\Chronicler\Record\StoredEventReader;
 use Storm\Contracts\Chronicler\UndecodableRow;
 use Storm\Contracts\Serializer\SerializationExceptionContract;
 use Storm\Message\Message;
 use Storm\Support\Error\AuditDigest;
+use Storm\Support\Error\TransientFailure;
 use Storm\Support\OutboxDisposal;
 use Throwable;
 
@@ -98,8 +100,13 @@ use Throwable;
  *   cooling down it is out of the claim entirely, so it burns no `attempts` and, crucially, takes no
  *   slot from the other partitions; it still gates its own tail through the probe's `cooling_floor`,
  *   and that DUE tail, refused behind it, is lazily realigned onto its `next_attempt_at`, so the tail
- *   leaves the claim too and the partition wakes as one. Once `attempts` reaches maxAttempts, the row
- *   is dead-lettered instead, so a genuine poison message cannot block its partition indefinitely.
+ *   leaves the claim too and the partition wakes as one. Once `attempts` reaches maxAttempts the row is
+ *   dead-lettered instead, so a genuine poison message cannot block its partition indefinitely, unless
+ *   {@see \Storm\Support\Error\TransientFailure} finds the transport or the database named in the cause
+ *   chain: the budget measures the BROKER's health, so spending it on an outage would dead-letter every
+ *   partition head within minutes of a broker going away, out of reach of every lag signal and
+ *   replayable only by hand. An infrastructure failure therefore keeps its row `pending` whatever the
+ *   attempt count, and the drain keeps reporting the outage until someone fixes it.
  *
  * A dead-lettered row leaves the `pending` index, so its partition unblocks; it stays for inspection
  * or replay via `storm:outbox:failed`. Note the trade-off: dead-lettering a row breaks ordering for
@@ -120,6 +127,9 @@ final readonly class OutboxRelay
      * replays the identical crash forever in a hot loop and `maxAttempts` never engages.
      */
     private const string PUBLISH_SAVEPOINT = 'storm_outbox_publish';
+
+    /** The heartbeat row's key: the event relay, as opposed to the saga command relay on its own table. */
+    private const string RELAY = 'event';
 
     public function __construct(
         private Connection $connection,
@@ -143,6 +153,12 @@ final readonly class OutboxRelay
          */
         // @infection-ignore-all; equivalent: the bundle always sets this argument, so the default serves a standalone construction no production wiring takes
         private int $stalledCooldownSeconds = 300,
+        /**
+         * Where a failed publish leaves its line, `storm.outbox.publish_failed` at warning with the
+         * partition held, the attempt spent and the budget: the outage is otherwise a non-zero exit
+         * and two columns on a row. Null logs nothing, for standalone use.
+         */
+        private ?LoggerInterface $logger = null,
     ) {}
 
     /**
@@ -358,8 +374,12 @@ final readonly class OutboxRelay
 
                     $attempts = $row->attempts + 1;
 
-                    if ($attempts >= $this->maxAttempts) {
-                        // Out of attempts: treat as poison, so dead-letter; partition not blocked, keep going.
+                    if ($attempts >= $this->maxAttempts && ! TransientFailure::behind($e)) {
+                        // Out of attempts, and nothing in the cause chain names the transport or the
+                        // database: the failure is the message's own, so dead-letter; partition not
+                        // blocked, keep going. An outage takes the lane below however long it lasts,
+                        // since the budget measures the broker and spending it on a broker that is
+                        // merely down would turn a wait into an operator's replay.
                         $this->deadLetter($connection, $row->raw, $e, $attempts);
                         $failed++;
 
@@ -384,6 +404,7 @@ final readonly class OutboxRelay
                     $blocked[$partition] = true;
                     $coldBlocked[$partition] = true; // the back-off just made this head cold
                     $transient ??= $e; // remember the first outage to surface after the commit
+                    $this->logPublishFailure($partition, $attempts, $e);
 
                     continue;
                 }
@@ -402,6 +423,12 @@ final readonly class OutboxRelay
             return new OutboxDrainResult(count($publishedIds), $failed, $stalled, $stalledCause, array_keys($stalledPartitions), count($rows) === $batch);
         });
 
+        // The heartbeat, after the drain committed and before any outage is surfaced: a tick that
+        // found nothing, or that failed forward, is still a relay alive, and the liveness check reads
+        // nothing else on a quiet system. Its own statement, outside the drain transaction, so a
+        // beat can never hold the claim's row locks and the drain can never roll a beat back.
+        $this->beat($result->published);
+
         if ($transient !== null) {
             // Progress + the bumped attempts are committed; now surface the outage so the run
             // retries, carrying the committed counts; fail forward, the work done must show.
@@ -409,6 +436,27 @@ final readonly class OutboxRelay
         }
 
         return $result;
+    }
+
+    /**
+     * Upserts this relay's row in `es_outbox_relay`: `ticked_at` to now, `relayed_total` up by what the
+     * drain disposed of. One row per relay name, the event relay's being `event`; the freshest row
+     * speaks for the fleet.
+     *
+     * A missing table is not swallowed: `es_outbox_relay` is core schema created with `es_outbox`, so
+     * its absence is an incomplete install, the same stance the liveness checks take, and a relay
+     * that beat into the void would restore the very blindness the row exists to end. The install
+     * precedes the binary, as for every core table.
+     */
+    private function beat(int $relayed): void
+    {
+        $this->connection->executeStatement(
+            /* language=PostgreSQL */
+            'INSERT INTO es_outbox_relay (relay, ticked_at, relayed_total) VALUES (:relay, clock_timestamp(), :relayed)
+             ON CONFLICT (relay) DO UPDATE SET ticked_at = EXCLUDED.ticked_at, relayed_total = es_outbox_relay.relayed_total + EXCLUDED.relayed_total',
+            ['relay' => self::RELAY, 'relayed' => $relayed],
+            ['relayed' => ParameterType::INTEGER],
+        );
     }
 
     /**
@@ -678,7 +726,7 @@ final readonly class OutboxRelay
         $digest = AuditDigest::digest($error);
 
         $connection->executeStatement(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 UPDATE es_outbox
                 SET last_error = :error,
@@ -719,5 +767,25 @@ final readonly class OutboxRelay
         $window = max(1, (int) min($this->backoffMaxSeconds, $seconds));
 
         return random_int(max(1, intdiv($window, 2)), $window);
+    }
+
+    // fail-open, as every observation around a commit: a logger that throws must not undo the back-off
+    private function logPublishFailure(string $partition, int $attempts, Throwable $failure): void
+    {
+        if ($this->logger === null) {
+            return;
+        }
+
+        try {
+            $this->logger->warning('storm.outbox.publish_failed', [
+                'relay' => self::RELAY,
+                'partition' => $partition,
+                'attempts' => $attempts,
+                'max_attempts' => $this->maxAttempts,
+                'error' => AuditDigest::digest($failure),
+            ]);
+        } catch (Throwable) {
+            // the observation may lose its line; it may never cost the relay its progress
+        }
     }
 }

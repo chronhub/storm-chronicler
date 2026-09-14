@@ -15,25 +15,35 @@ use Storm\Chronicler\Query\CorrelationFeedFilter;
 final class CorrelationFeedFilterTest extends TestCase
 {
     #[Test]
+    public function a_single_event_page_is_a_valid_bound(): void
+    {
+        $builder = $this->builder();
+        new CorrelationFeedFilter(['corr-9'], 1)->apply($builder);
+        self::assertSame(1, $builder->getMaxResults());
+        self::assertSame(['corr-9'], $builder->getParameter('correlationIds'));
+    }
+
+    #[Test]
     public function the_predicate_is_spelled_the_way_the_shipped_index_is_built(): void
     {
         // the one assertion this filter exists for. `event_store_correlation_idx` is built on
-        // `header #>> '{__correlation_id}'`, and only the path form and this bound
-        // `string_to_array` form resolve to it; the `->>` key form returns the same text, matches
-        // nothing, and scans the whole store while every row still looks right.
+        // `header #>> '{__correlation_id}'`; the literal path keeps matching under generic plans.
+        // The `->>` key form returns the same text, matches nothing, and scans the whole store while
+        // every row still looks right.
         $sql = $this->render(new CorrelationFeedFilter(['corr-9'], 1000));
 
-        self::assertStringContainsString("#>> string_to_array(:correlationPath, ',')", $sql);
+        self::assertStringContainsString("#>> '{__correlation_id}'", $sql);
+        self::assertStringNotContainsString('string_to_array', $sql);
         self::assertStringNotContainsString('->>', $sql);
     }
 
     #[Test]
-    public function the_bound_path_is_the_promoted_header_wire_key(): void
+    public function the_literal_path_leaves_no_path_binding(): void
     {
         $qb = $this->builder();
         new CorrelationFeedFilter(['corr-9'], 1000)->apply($qb);
 
-        self::assertSame('__correlation_id', $qb->getParameter('correlationPath'));
+        self::assertArrayNotHasKey('correlationPath', $qb->getParameters());
     }
 
     #[Test]
@@ -75,6 +85,16 @@ final class CorrelationFeedFilterTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         new CorrelationFeedFilter([], 1000);
+    }
+
+    #[Test]
+    #[Group('adversarial')]
+    public function a_non_positive_limit_is_refused_rather_than_returning_an_empty_trace(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('A correlation feed limit must be positive.');
+
+        new CorrelationFeedFilter(['corr-9'], 0);
     }
 
     private function render(CorrelationFeedFilter $filter): string

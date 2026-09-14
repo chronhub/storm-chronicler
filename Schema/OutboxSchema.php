@@ -134,6 +134,21 @@ final class OutboxSchema
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_outbox_failed_idx ON es_outbox (id) WHERE status = 'failed'
                 SQL,
+            // The relay's heartbeat, one row per relay name, upserted on every drain whether or not
+            // it found work. It is the ONE signal of a relay that is alive on a quiet system: the
+            // pending-age surfaces read nothing when nothing is pending, so a relay that died on an
+            // idle night is invisible to them until the first backlog. `relayed_total` counts the
+            // rows disposed of over the relay's life, a monotone the operator can watch move.
+            /** @lang PostgreSQL */
+            <<<'SQL'
+                CREATE TABLE IF NOT EXISTS es_outbox_relay (
+                    relay         text           NOT NULL,
+                    ticked_at     timestamptz(6) NOT NULL DEFAULT clock_timestamp(),
+                    relayed_total bigint         NOT NULL DEFAULT 0,
+                    CONSTRAINT es_outbox_relay_pk PRIMARY KEY (relay),
+                    CONSTRAINT es_outbox_relay_relayed_total_chk CHECK (relayed_total >= 0)
+                )
+                SQL,
         ];
     }
 
@@ -143,8 +158,10 @@ final class OutboxSchema
     public static function down(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS es_outbox',
+            /* language=PostgreSQL */
+            'DROP TABLE IF EXISTS es_outbox_relay',
         ];
     }
 }

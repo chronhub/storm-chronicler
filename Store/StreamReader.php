@@ -83,6 +83,16 @@ interface StreamReader
     public function retrieveByFilter(QueryFilter $filter): Generator;
 
     /**
+     * The highest event position committed and visible to the current statement.
+     *
+     * This is a freshness target, not a catch-up bound. It can sit above an unresolved
+     * sequence gap, so a scanner must keep using `safeHeadPosition()`.
+     *
+     * Returns null when no committed event is visible.
+     */
+    public function committedHeadPosition(): ?Position;
+
+    /**
      * The commit-order safe watermark: the highest Position `P` such that every position up to
      * `P` is settled: committed, aborted, or PRESUMED aborted after the grace window.
      *

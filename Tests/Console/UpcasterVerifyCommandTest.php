@@ -78,6 +78,37 @@ final class UpcasterVerifyCommandTest extends TestCase
     }
 
     #[Test]
+    public function the_json_verdict_types_each_problem_beside_its_phrase(): void
+    {
+        // a deployment hook reads the kind, never the sentence: the same two families the listing
+        // shows, typed, and the type that resolves to nothing declares no runtime version at all
+        $tester = $this->tester(
+            [
+                ['type' => SomethingHappened::class, 'floor' => 1, 'ceiling' => 3, 'n' => 12],
+                ['type' => 'ghost.event', 'floor' => 1, 'ceiling' => 1, 'n' => 4],
+            ],
+            version: 3,
+        );
+
+        $tester->execute(['--json' => true]);
+
+        $this->assertSame(Command::FAILURE, $tester->getStatusCode());
+        /** @var array{conformant: bool, problems: list<string>, anomalies: list<array{type: string, floor: int, current: int|null, ceiling: int, kind: string, problem: string}>} $document */
+        $document = json_decode($tester->getDisplay(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertFalse($document['conformant']);
+
+        $anomalies = $document['anomalies'];
+        $this->assertSame(['missing_step', 'missing_step', 'unknown_type'], array_column($anomalies, 'kind'));
+        $this->assertSame(SomethingHappened::class, $anomalies[0]['type']);
+        $this->assertSame(1, $anomalies[0]['floor']);
+        $this->assertSame(3, $anomalies[0]['current']);
+        $this->assertSame(3, $anomalies[0]['ceiling']);
+        $this->assertSame('ghost.event', $anomalies[2]['type']);
+        $this->assertNull($anomalies[2]['current'], 'no class resolves, so no runtime version is established');
+        $this->assertSame($document['problems'], array_column($anomalies, 'problem'));
+    }
+
+    #[Test]
     public function the_failure_count_is_the_number_of_problems_not_of_types(): void
     {
         // one stored type, three missing steps: the operator is told how much is broken, not how many

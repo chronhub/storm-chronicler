@@ -7,13 +7,17 @@ namespace Storm\Chronicler\Evolution;
 use Storm\Chronicler\Exception\UpcasterFailed;
 
 use function array_diff;
+use function array_key_exists;
 use function array_keys;
+use function count;
+use function implode;
+use function sort;
 use function sprintf;
 
 /**
  * The declaration-level compatibility verdict: given the message catalogue a revision published and
- * the one this revision publishes, reports every change that would make an existing store
- * unreadable.
+ * the one this revision publishes, reports alias-resolution and event-version incompatibilities,
+ * including upcaster failures and incompatible declared personal contexts.
  *
  * The upstream face of {@see UpcasterConformance}, and the two do not overlap. Conformance answers
  * "can this binary read the store in front of me", computed FROM the rows, which ties it to a store
@@ -22,10 +26,13 @@ use function sprintf;
  * can speak before the row exists, and that is the one that can run on a pull request.
  *
  * The rules are the event-change matrix and nothing invented here. A PHP class renamed under a
- * stable alias is not reported, that being the very case the alias exists to make free.
+ * stable alias is refused when its current destination is declared personal. Other class renames
+ * pass at the type-resolution boundary unless the historical declaration is personal. Enriched
+ * entries also preserve the historical subject and keys. Declarations do not establish that every
+ * stored field remains readable, and alias stability alone does not migrate encrypted data.
  *
  * What it cannot see is worth naming, because a gate trusted beyond its reach is worse than none. It
- * reads declarations, so a payload key renamed at a constant version passes it: the shapes are not
+ * reads declarations, so an undeclared payload key renamed at a constant version passes it: shapes are not
  * catalogued, deliberately, a verdict derived from reading accessors being a heuristic where these
  * are exact. And a change of MEANING under a stable alias and version is invisible to any tool; the
  * matrix routes it to a new alias, and only a reviewer enforces that.
@@ -33,39 +40,209 @@ use function sprintf;
 final readonly class CatalogueCompatibility
 {
     /**
-     * The catalogue FORMAT's version, not any event's, and it lives here rather than with the
-     * renderer because this is the side that must REFUSE a document it cannot read. A reader that
-     * judged an unknown shape would return a verdict about fields it guessed at; refusing is the only
-     * honest answer, and the constant belongs to whoever gives it.
-     *
-     * It moves when the document gains or loses a field, the payload shapes a later revision may
-     * carry being the case it is reserved for.
+     * The format emitted by the catalogue writer; reading a format does not enable its emission.
      */
     public const int SCHEMA_VERSION = 1;
 
+    public const array READABLE_SCHEMA_VERSIONS = [1, 2];
+
+    /**
+     * @param  array<string, array{subject: string, keys: list<string>, fallbacks: array<string, mixed>}>  $personalData
+     */
     public function __construct(
         private UpcasterChain $upcasters,
+        private array $personalData = [],
     ) {}
 
     /**
-     * One line per incompatibility, empty when the change is safe for any existing store.
+     * One line per detected incompatibility, empty when all checked declarations are compatible.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $baseline  the catalogue of the revision being compared against
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $current  the catalogue this revision publishes
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $baseline  the catalogue of the revision being compared against
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current  the catalogue this revision publishes
      * @return list<string>
      */
     public function verdicts(array $baseline, array $current): array
     {
         $problems = $this->unresolvable($baseline, $current);
 
-        foreach ($baseline as $alias => $was) {
-            $is = $current[$alias] ?? null;
+        $claimants = [];
+        foreach ($current as $currCanonical => $currEntry) {
+            $claimants[$currCanonical][] = $currCanonical;
+            foreach ($currEntry['replaces'] as $replaced) {
+                $claimants[$replaced][] = $currCanonical;
+            }
+        }
 
-            if ($is === null) {
-                continue; // the alias left the canonical set; whether that is a loss is the resolvability check's to say
+        $historical = [];
+        foreach ($baseline as $baseCanonical => $baseEntry) {
+            $historical[$baseCanonical] = [
+                'destination' => $baseCanonical,
+                'version' => $baseEntry['version'],
+            ];
+        }
+        foreach ($baseline as $baseCanonical => $baseEntry) {
+            foreach ($baseEntry['replaces'] as $replaced) {
+                if (! isset($historical[$replaced])) {
+                    $historical[$replaced] = [
+                        'destination' => $baseCanonical,
+                        'version' => $baseEntry['version'],
+                    ];
+                }
+            }
+        }
+
+        $auditCache = [];
+
+        foreach ($historical as $alias => $source) {
+            $claims = $claimants[$alias] ?? [];
+
+            if ($claims === []) {
+                continue;
             }
 
-            $problems = [...$problems, ...$this->versionMove($alias, $was['version'], $is['version'])];
+            if (count($claims) > 1) {
+                sort($claims);
+                $problems[] = sprintf(
+                    'alias "%s" is claimed by more than one current event ("%s") — resolution would depend on discovery order',
+                    $alias,
+                    implode('", "', $claims),
+                );
+
+                continue;
+            }
+
+            $currentDestination = $claims[0];
+            $baseDestination = $source['destination'];
+            $canonicalChanged = $currentDestination !== $baseDestination;
+
+            if (! $canonicalChanged && $alias !== $baseDestination) {
+                continue;
+            }
+
+            $label = $currentDestination === $alias
+                ? sprintf('"%s"', $alias)
+                : sprintf('"%s" (canonical "%s")', $alias, $currentDestination);
+
+            $previousClass = $baseline[$baseDestination]['class'];
+            $currentClass = $current[$currentDestination]['class'];
+
+            if ($previousClass !== $currentClass && isset($this->personalData[$currentClass])) {
+                $problems[] = sprintf(
+                    'alias %s changed PHP class from "%s" to "%s", whose current declaration is personal; encrypted historical fields bind the original class, so keeping the alias does not preserve decryption',
+                    $label,
+                    $previousClass,
+                    $currentClass,
+                );
+            }
+
+            $historicalPersonal = $baseline[$baseDestination]['personal'] ?? null;
+            $currentPersonal = $current[$currentDestination]['personal'] ?? null;
+            if ($historicalPersonal !== null) {
+                if ($previousClass !== $currentClass && ! isset($this->personalData[$currentClass])) {
+                    $problems[] = sprintf('alias %s changed the PHP class of a historical personal declaration from "%s" to "%s"; encrypted fields bind the original class', $label, $previousClass, $currentClass);
+                }
+                if ($currentPersonal === null) {
+                    $problems[] = sprintf('alias %s removed its personal declaration; historical encrypted fields still require their original context', $label);
+                } else {
+                    if ($historicalPersonal['subject'] !== $currentPersonal['subject']) {
+                        $problems[] = sprintf('alias %s changed its personal subject; historical encrypted fields bind the original subject', $label);
+                    }
+                    foreach (array_diff($historicalPersonal['keys'], $currentPersonal['keys']) as $key) {
+                        $problems[] = sprintf('alias %s removed personal key "%s"; historical encrypted fields bind their original key', $label, $key);
+                    }
+                }
+            }
+
+            $was = $source['version'];
+            $is = $current[$currentDestination]['version'];
+
+            if ($is < $was) {
+                $problems[] = sprintf(
+                    'alias %s went from schema version %d down to %d — a binary that reads a shape it no longer declares refuses those rows',
+                    $label,
+                    $was,
+                    $is,
+                );
+
+                continue;
+            }
+
+            // A new canonical alias invalidates earlier chain proofs, so every historical step needs checking.
+            $from = $canonicalChanged ? 1 : $was;
+            $to = $is;
+
+            $cacheKey = "$currentDestination:$from:$to";
+            if (! array_key_exists($cacheKey, $auditCache)) {
+                try {
+                    $auditCache[$cacheKey] = $this->upcasters->audit($currentDestination, $from, $to);
+                } catch (UpcasterFailed $e) {
+                    $auditCache[$cacheKey] = $e;
+                }
+            }
+
+            $audit = $auditCache[$cacheKey];
+            if ($audit instanceof UpcasterFailed) {
+                $problems[] = sprintf('alias %s: %s', $label, $audit->getMessage());
+
+                continue;
+            }
+
+            foreach ($audit->missing as $step) {
+                $problems[] = $canonicalChanged
+                    ? sprintf(
+                        'alias %s requires an upcaster for the step v%d to v%d under the current canonical alias — moving an alias must preserve its entire upcaster chain',
+                        $label,
+                        $step,
+                        $step + 1,
+                    )
+                    : sprintf(
+                        'alias %s moved from schema version %d to %d with no upcaster for the step v%d to v%d — a version bump must ship its upcaster',
+                        $label,
+                        $was,
+                        $is,
+                        $step,
+                        $step + 1,
+                    );
+            }
+
+            foreach ($audit->duplicated as $step) {
+                $problems[] = sprintf(
+                    'alias %s: more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order',
+                    $label,
+                    $step,
+                    $step + 1,
+                );
+            }
+        }
+
+        return $problems;
+    }
+
+    /**
+     * Rejects a current document whose personal contexts disagree with the running container.
+     *
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current
+     * @return list<string>
+     */
+    public function currentPersonalMismatches(array $current): array
+    {
+        $problems = [];
+        foreach ($current as $alias => $entry) {
+            $declared = $entry['personal'] ?? null;
+            $runtime = $this->personalData[$entry['class']] ?? null;
+            if ($declared === null && $runtime === null) {
+                continue;
+            }
+            if ($declared !== null && $runtime !== null) {
+                $declaredKeys = $declared['keys'];
+                $runtimeKeys = $runtime['keys'];
+                sort($declaredKeys);
+                sort($runtimeKeys);
+                if ($declared['subject'] === $runtime['subject'] && $declaredKeys === $runtimeKeys) {
+                    continue;
+                }
+            }
+            $problems[] = sprintf('alias "%s" does not match the current runtime personal declaration; the message contract was not judged', $alias);
         }
 
         return $problems;
@@ -78,8 +255,8 @@ final readonly class CatalogueCompatibility
      * canonical alias deleted and a `replaces` entry dropped both leave rows carrying a type that
      * now resolves to nothing, and both are readable again only by putting the name back.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $baseline
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $current
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $baseline
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current
      * @return list<string>
      */
     private function unresolvable(array $baseline, array $current): array
@@ -99,58 +276,9 @@ final readonly class CatalogueCompatibility
     }
 
     /**
-     * The verdict on one alias whose version moved, which is where a bump meets its upcaster.
-     *
-     * @return list<string>
-     */
-    private function versionMove(string $alias, int $was, int $is): array
-    {
-        if ($is < $was) {
-            return [sprintf(
-                'alias "%s" went from schema version %d down to %d — a binary that reads a shape it no longer declares refuses those rows',
-                $alias, $was, $is,
-            )];
-        }
-
-        // @infection-ignore-all
-        // Removing this return is an EQUIVALENT, and the pin sits here rather than in the config
-        // because the line carries no other mutant to smother: `audit($alias, $v, $v)` walks the
-        // steps of an empty range, so it reports neither a gap nor a duplicate and the fall-through
-        // returns the same empty list. The early return says the intent, that an unmoved version
-        // asks the chain nothing.
-        if ($is === $was) {
-            return [];
-        }
-
-        try {
-            $audit = $this->upcasters->audit($alias, $was, $is);
-        } catch (UpcasterFailed $e) {
-            return [sprintf('alias "%s": %s', $alias, $e->getMessage())];
-        }
-
-        $problems = [];
-
-        foreach ($audit->missing as $step) {
-            $problems[] = sprintf(
-                'alias "%s" moved from schema version %d to %d with no upcaster for the step v%d to v%d — a version bump must ship its upcaster',
-                $alias, $was, $is, $step, $step + 1,
-            );
-        }
-
-        foreach ($audit->duplicated as $step) {
-            $problems[] = sprintf(
-                'alias "%s": more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order',
-                $alias, $step, $step + 1,
-            );
-        }
-
-        return $problems;
-    }
-
-    /**
      * Every alias a catalogue can resolve: each canonical name plus the former names it still answers to.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $catalogue
+     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $catalogue
      * @return list<string>
      */
     private static function resolvable(array $catalogue): array

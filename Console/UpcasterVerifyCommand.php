@@ -8,6 +8,7 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use JsonException;
 use Override;
+use Storm\Chronicler\Evolution\ConformanceAnomaly;
 use Storm\Chronicler\Evolution\UpcasterConformance;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -27,10 +28,19 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * `storm:install` runs the same conformance inside its transaction when the event side carries
  * rows; this command is the standalone moment for a code-only deploy, which runs no install.
  *
+ * The `--json` document carries the verdict twice over: `problems`, the phrases the listing prints,
+ * and `anomalies`, the same verdicts typed and in that same order, so a hook branches on a `kind`
+ * instead of matching prose.
+ *
  * Examples:
  *
  * ```bash
  * bin/console storm:upcaster:verify
+ * ```
+ *
+ * ```bash
+ * # the deployment hook's form: the verdict on the exit code, the reasons typed in the document
+ * bin/console storm:upcaster:verify --json
  * ```
  */
 #[AsCommand(name: 'storm:upcaster:verify', description: 'Verify every stored event row is readable by this binary\'s upcaster chain.')]
@@ -60,13 +70,19 @@ final class UpcasterVerifyCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        $problems = $this->conformance->problems($this->connection);
+        // one interrogation, read twice: the listing takes the phrases, the document takes both faces
+        $anomalies = $this->conformance->anomalies($this->connection);
+        $problems = array_map(static fn (ConformanceAnomaly $anomaly): string => $anomaly->problem, $anomalies);
 
         if ($input->getOption('json') === true) {
             // a deployment gate is scripted by definition: the verdict rides the exit code, the reasons
             // ride the document, and neither has to be scraped out of an error block
             $output->writeln(json_encode(
-                ['conformant' => $problems === [], 'problems' => $problems],
+                [
+                    'conformant' => $problems === [],
+                    'problems' => $problems,
+                    'anomalies' => array_map(static fn (ConformanceAnomaly $anomaly): array => $anomaly->toArray(), $anomalies),
+                ],
                 JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES,
             ));
 

@@ -11,5 +11,5 @@ use Storm\Message\EventType;
  * were stored under. The mapper appends that FQCN itself, so the two sources overlap; it is the one
  * overlap the attribute cannot refuse, since it never sees the class it decorates.
  */
-#[EventType('test.pre_alias', replaces: ['Storm\Chronicler\Tests\Fixture\PreAliasEvent'])]
+#[EventType('test.pre_alias', replaces: [PreAliasEvent::class])]
 final class PreAliasEvent {}

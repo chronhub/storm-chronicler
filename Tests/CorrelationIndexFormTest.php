@@ -32,8 +32,10 @@ use function token_get_all;
  * 300k-row store, the same point lookup costs 6383 buffers one way and 4 the other.
  *
  * The framework declares the index, so the framework owes the guard. `InspectFilter` binds the path
- * as `#>> string_to_array(:p, ',')`, which the planner resolves to the same expression, and is the
- * reason this reads zero offenders today rather than the rule being unexercised.
+ * as `#>> string_to_array(:p, ',')`, and is the reason this reads zero offenders today rather than
+ * the rule being unexercised. That spelling reaches the index only when the planner folds the bound
+ * parameter back into the indexed expression, which a custom plan does; a generic plan keeps the
+ * parameter opaque and matches the form to no index at all.
  *
  * A comparison against a column pinned `COLLATE "C"` misses the index the same way, resolving to a
  * collation it is not built under. Collate to the side whose index must serve.
@@ -55,6 +57,7 @@ final class CorrelationIndexFormTest extends TestCase
     private const array ARROW_FILTERS = [
         '/header\s*->>\s*\\\\?\'__correlation_id\\\\?\'\s*(=|<>|!=|(not\s+)?in\b)/i',
         '/(=|<>|!=)\s*[a-z_]*\.?header\s*->>\s*\\\\?\'__correlation_id\\\\?\'/i',
+        '/header\s*->>\s*(?:\\\\?[a-z_][a-z0-9_\\\\]*::)?CorrelationId->value\s*(=|<>|!=|(not\s+)?in\b)/i',
     ];
 
     #[Test]
@@ -69,16 +72,12 @@ final class CorrelationIndexFormTest extends TestCase
         foreach ($sources as $file) {
             $code = self::withoutComments((string) file_get_contents($file));
 
-            if (! str_contains($code, '__correlation_id')) {
+            if (! str_contains($code, '__correlation_id') && ! str_contains($code, 'CorrelationId->value')) {
                 continue;
             }
 
-            foreach (self::ARROW_FILTERS as $pattern) {
-                if (preg_match_all($pattern, $code) > 0) {
-                    $offenders[] = $file;
-
-                    break;
-                }
+            if (self::containsArrowFilter($code)) {
+                $offenders[] = $file;
             }
         }
 
@@ -88,6 +87,14 @@ final class CorrelationIndexFormTest extends TestCase
             ."Write `header #>> '{__correlation_id}'`, the expression `event_store_correlation_idx` is built on. "
             .'Comparing against a `COLLATE "C"` column also needs `COLLATE pg_catalog."default"` on that side.',
             implode("\n  ", $offenders),
+        ));
+    }
+
+    #[Test]
+    public function the_enum_backed_key_form_is_detected(): void
+    {
+        self::assertTrue(self::containsArrowFilter(
+            'e.header ->> Header::'.'CorrelationId->value IN (:correlationIds)',
         ));
     }
 
@@ -111,5 +118,10 @@ final class CorrelationIndexFormTest extends TestCase
         }
 
         return $code;
+    }
+
+    private static function containsArrowFilter(string $code): bool
+    {
+        return array_any(self::ARROW_FILTERS, fn ($pattern) => preg_match_all($pattern, $code) > 0);
     }
 }

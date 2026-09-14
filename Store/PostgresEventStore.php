@@ -17,6 +17,7 @@ use Storm\Chronicler\Exception\StaleVersion;
 use Storm\Chronicler\Outbox\OutboxEntry;
 use Storm\Chronicler\Outbox\OutboxWriter;
 use Storm\Chronicler\Query\QueryFilter;
+use Storm\Chronicler\Record\SequencePosition;
 use Storm\Chronicler\Record\StreamPersistence;
 use Storm\Chronicler\SafeHead\SafeHeadAdvancer;
 use Storm\Chronicler\Telemetry\AppendContext;
@@ -198,6 +199,23 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         $filter->apply($query);
 
         return $this->cursor($query, source: 'retrieveByFilter', target: $filter::class);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @throws Exception on a DBAL failure of the head query
+     */
+    public function committedHeadPosition(): ?Position
+    {
+        $position = $this->connection->fetchOne(
+            /** @lang PostgreSQL */
+            'SELECT max(sequence_no) FROM event_store',
+        );
+
+        return $position === null || $position === false
+            ? null
+            : SequencePosition::fromString((string) $position);
     }
 
     /**

@@ -7,8 +7,10 @@ namespace Storm\Chronicler\Inbox;
 use Closure;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
+use Psr\Log\LoggerInterface;
 use Storm\Support\Dbal\BatchedDelete;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
+use Throwable;
 
 /**
  * Default InboxStore: records `(consumer, message_id)` and runs the handler in one DBAL transaction.
@@ -18,6 +20,11 @@ use Symfony\Component\DependencyInjection\Attribute\AsAlias;
  * effects on the default connection and the inbox row commit together; a throw rolls both back and
  * the message is reprocessed on redelivery. Atomicity covers DB effects on this connection, not
  * external side effects like HTTP or mail, which stay at-least-once.
+ *
+ * A skip is counted where it happens: the row keeps how many redeliveries it absorbed in
+ * `duplicates` and the last one in `last_duplicate_at`, and a logger, when one is given, gets
+ * `storm.chronicler.inbox_duplicate` at info. Without them a working inbox is silent, and nothing
+ * outside it says a duplicate ever came.
  */
 #[AsAlias(InboxStore::class)]
 final readonly class DbalInboxStore implements InboxStore
@@ -27,6 +34,7 @@ final readonly class DbalInboxStore implements InboxStore
 
     public function __construct(
         private Connection $connection,
+        private ?LoggerInterface $logger = null,
     ) {}
 
     /**
@@ -37,7 +45,7 @@ final readonly class DbalInboxStore implements InboxStore
     public function once(string $consumer, string $messageId, Closure $handler): bool
     {
         return $this->connection->transactional(
-            static function (Connection $tx) use ($consumer, $messageId, $handler): bool {
+            function (Connection $tx) use ($consumer, $messageId, $handler): bool {
                 $inserted = $tx->executeStatement(
                     /** @lang PostgreSQL */
                     // the conflict target is NAMED: only the dedup key may absorb a violation into
@@ -48,6 +56,15 @@ final readonly class DbalInboxStore implements InboxStore
                 );
 
                 if ($inserted === 0) {
+                    $duplicates = (int) $tx->fetchOne(
+                        /* language=PostgreSQL */
+                        'UPDATE es_inbox SET duplicates = duplicates + 1, last_duplicate_at = clock_timestamp()
+                         WHERE consumer = :consumer AND message_id = :message_id
+                         RETURNING duplicates',
+                        ['consumer' => $consumer, 'message_id' => $messageId],
+                    );
+                    $this->logDuplicate($consumer, $messageId, $duplicates);
+
                     return false;
                 }
 
@@ -56,6 +73,24 @@ final readonly class DbalInboxStore implements InboxStore
                 return true;
             },
         );
+    }
+
+    // fail-open, as every observation around a commit: a logger that throws must not undo the skip
+    private function logDuplicate(string $consumer, string $messageId, int $duplicates): void
+    {
+        if ($this->logger === null) {
+            return;
+        }
+
+        try {
+            $this->logger->info('storm.chronicler.inbox_duplicate', [
+                'consumer' => $consumer,
+                'message_id' => $messageId,
+                'duplicates' => $duplicates,
+            ]);
+        } catch (Throwable) {
+            // the observation may lose its line; it may never cost the inbox its answer
+        }
     }
 
     /**

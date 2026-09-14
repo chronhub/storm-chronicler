@@ -21,13 +21,59 @@ use function implode;
  * check is: a diff. A rule tested against a single catalogue would pin what the rule reads, never
  * what it compares, and the comparison is where every one of these lives.
  *
- * The passing cases carry as much as the failing ones. A gate that refuses a class rename under a
+ * The passing cases carry as much as the failing ones. A gate that refuses a non-personal class rename under a
  * stable alias, or a version bump that DID ship its upcaster, is a gate a team routes around within
  * a week; the alias exists precisely to make the first free, and the second is the idiom the matrix
  * prescribes.
  */
 final class CatalogueCompatibilityTest extends TestCase
 {
+    #[Test]
+    public function a_class_rename_under_a_stable_alias_is_refused_when_the_current_class_is_personal(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain, ['App\\CurrentEvent' => ['subject' => 'id', 'keys' => ['name'], 'fallbacks' => ['name' => null]]]);
+        $problems = $compatibility->verdicts(
+            ['customer.created' => $this->entry(class: 'App\\OldEvent')],
+            ['customer.created' => $this->entry(class: 'App\\CurrentEvent')],
+        );
+        self::assertCount(1, $problems);
+        self::assertStringContainsString('customer.created', $problems[0]);
+        self::assertStringContainsString('App\\OldEvent', $problems[0]);
+        self::assertStringContainsString('App\\CurrentEvent', $problems[0]);
+    }
+
+    #[Test]
+    public function a_class_rename_under_a_stable_alias_stays_unreported_for_a_non_personal_class(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain, ['App\\PersonalEvent' => ['subject' => 'id', 'keys' => ['name'], 'fallbacks' => ['name' => null]]]);
+        $problems = $compatibility->verdicts(
+            ['customer.created' => $this->entry(class: 'App\\OldEvent')],
+            ['customer.created' => $this->entry(class: 'App\\CurrentEvent')],
+        );
+        self::assertSame([], $problems);
+    }
+
+    #[Test]
+    public function a_personal_class_rename_is_refused_through_replaces(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain, ['App\\CurrentEvent' => ['subject' => 'id', 'keys' => ['name'], 'fallbacks' => ['name' => null]]]);
+        $problems = $compatibility->verdicts(
+            ['customer.created' => $this->entry(class: 'App\\OldEvent')],
+            ['customer.registered' => $this->entry(class: 'App\\CurrentEvent', replaces: ['customer.created'])],
+        );
+        self::assertCount(1, $problems);
+        self::assertStringContainsString('customer.created', $problems[0]);
+        self::assertStringContainsString('customer.registered', $problems[0]);
+    }
+
+    #[Test]
+    public function an_unchanged_personal_class_is_not_reported(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain, ['App\\CurrentEvent' => ['subject' => 'id', 'keys' => ['name'], 'fallbacks' => ['name' => null]]]);
+        $catalogue = ['customer.created' => $this->entry(class: 'App\\CurrentEvent')];
+        self::assertSame([], $compatibility->verdicts($catalogue, $catalogue));
+    }
+
     #[Test]
     public function a_new_alias_is_additive_and_passes(): void
     {
@@ -42,7 +88,7 @@ final class CatalogueCompatibilityTest extends TestCase
     #[Test]
     public function a_class_renamed_under_a_stable_alias_passes(): void
     {
-        // the case the alias exists to make free; a gate refusing it would teach people to avoid it
+        // alias stability preserves type resolution; this verdict does not assess personal cipher context
         $verdicts = $this->compatibility()->verdicts(
             ['order.placed' => $this->entry(class: 'App\Old\OrderPlaced')],
             ['order.placed' => $this->entry(class: 'App\New\OrderWasPlaced')],
@@ -253,6 +299,129 @@ final class CatalogueCompatibilityTest extends TestCase
         self::assertStringContainsString('order.placed', $verdicts[0]);
     }
 
+    #[Test]
+    public function an_upcaster_left_on_the_replaced_alias_is_not_the_chain_the_runtime_calls(): void
+    {
+        $verdicts = $this->compatibility($this->upcaster('order.placed', 1))->verdicts(
+            ['order.placed' => $this->entry()],
+            ['ordering.placed' => $this->entry(version: 2, replaces: ['order.placed'])],
+        );
+
+        self::assertCount(1, $verdicts);
+        self::assertStringContainsString('order.placed', $verdicts[0]);
+        self::assertStringContainsString('canonical "ordering.placed"', $verdicts[0]);
+        self::assertStringContainsString('v1 to v2', $verdicts[0]);
+    }
+
+    #[Test]
+    public function a_rename_at_a_stable_version_still_needs_the_whole_chain_under_the_new_alias(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain([
+            $this->upcaster('order.placed', 1),
+            $this->upcaster('order.placed', 2),
+        ]));
+        $verdicts = $compatibility->verdicts(
+            ['order.placed' => $this->entry(version: 3)],
+            ['ordering.placed' => $this->entry(version: 3, replaces: ['order.placed'])],
+        );
+
+        self::assertCount(2, $verdicts);
+        self::assertStringContainsString('v1 to v2', $verdicts[0]);
+        self::assertStringContainsString('v2 to v3', $verdicts[1]);
+        self::assertStringNotContainsString('moved from schema version 3 to 3', implode(' ', $verdicts));
+        foreach ($verdicts as $verdict) {
+            self::assertStringContainsString('canonical "ordering.placed"', $verdict);
+        }
+    }
+
+    #[Test]
+    public function a_replaced_alias_cannot_hide_a_version_downgrade(): void
+    {
+        $verdicts = $this->compatibility()->verdicts(
+            ['order.placed' => $this->entry(version: 3)],
+            ['ordering.placed' => $this->entry(version: 2, replaces: ['order.placed'])],
+        );
+
+        self::assertCount(1, $verdicts);
+        self::assertStringContainsString('down to 2', $verdicts[0]);
+        self::assertStringContainsString('order.placed', $verdicts[0]);
+        self::assertStringContainsString('canonical "ordering.placed"', $verdicts[0]);
+    }
+
+    #[Test]
+    public function a_historical_replaces_alias_is_checked_against_its_current_destination(): void
+    {
+        $verdicts = $this->compatibility()->verdicts(
+            ['ordering.placed' => $this->entry(replaces: ['order.placed'])],
+            [
+                'ordering.placed' => $this->entry(),
+                'billing.placed' => $this->entry(version: 2, replaces: ['order.placed']),
+            ],
+        );
+
+        self::assertCount(1, $verdicts);
+        self::assertStringContainsString('order.placed', $verdicts[0]);
+        self::assertStringContainsString('canonical "billing.placed"', $verdicts[0]);
+        self::assertStringContainsString('v1 to v2', $verdicts[0]);
+    }
+
+    #[Test]
+    public function a_historical_alias_claimed_by_two_current_entries_is_refused_and_not_resolved_by_order(): void
+    {
+        $baseline = ['order.placed' => $this->entry()];
+        $current = [
+            'a.placed' => $this->entry(replaces: ['order.placed']),
+            'b.placed' => $this->entry(replaces: ['order.placed']),
+        ];
+        $verdicts = $this->compatibility()->verdicts($baseline, $current);
+
+        self::assertCount(1, $verdicts);
+        foreach (['order.placed', 'a.placed', 'b.placed'] as $alias) {
+            self::assertStringContainsString($alias, $verdicts[0]);
+        }
+        self::assertSame($verdicts, $this->compatibility()->verdicts($baseline, array_reverse($current, true)));
+    }
+
+    #[Test]
+    public function a_complete_chain_under_the_new_canonical_alias_passes(): void
+    {
+        $compatibility = new CatalogueCompatibility(new UpcasterChain([
+            $this->upcaster('ordering.placed', 1),
+            $this->upcaster('ordering.placed', 2),
+        ]));
+        foreach ([1, 3] as $baselineVersion) {
+            self::assertSame([], $compatibility->verdicts(
+                ['order.placed' => $this->entry(version: $baselineVersion)],
+                ['ordering.placed' => $this->entry(version: 3, replaces: ['order.placed'])],
+            ));
+        }
+    }
+
+    #[Test]
+    public function a_stable_canonical_bump_with_replaces_reports_each_step_once(): void
+    {
+        $verdicts = $this->compatibility()->verdicts(
+            ['ordering.placed' => $this->entry(replaces: ['order.placed'])],
+            ['ordering.placed' => $this->entry(version: 2, replaces: ['order.placed'])],
+        );
+
+        self::assertCount(1, $verdicts);
+        self::assertStringContainsString('alias "ordering.placed"', $verdicts[0]);
+        self::assertStringContainsString('v1 to v2', $verdicts[0]);
+    }
+
+    #[Test]
+    public function historical_aliases_can_split_between_unique_current_destinations(): void
+    {
+        self::assertSame([], $this->compatibility()->verdicts(
+            ['old.entry' => $this->entry(replaces: ['x', 'y'])],
+            [
+                'a.entry' => $this->entry(replaces: ['x', 'old.entry']),
+                'b.entry' => $this->entry(replaces: ['y']),
+            ],
+        ));
+    }
+
     private function compatibility(?Upcaster $upcaster = null): CatalogueCompatibility
     {
         return new CatalogueCompatibility(new UpcasterChain($upcaster === null ? [] : [$upcaster]));
@@ -265,9 +434,9 @@ final class CatalogueCompatibilityTest extends TestCase
 
     private function upcaster(string $alias, int $fromVersion): Upcaster
     {
-        return new class($alias, $fromVersion) implements Upcaster
+        return new readonly class($alias, $fromVersion) implements Upcaster
         {
-            public function __construct(private readonly string $alias, private readonly int $fromVersion) {}
+            public function __construct(private string $alias, private int $fromVersion) {}
 
             public function supports(string $alias, int $fromVersion): bool
             {

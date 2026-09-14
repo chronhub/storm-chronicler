@@ -32,7 +32,7 @@ it and `Projector` reads through it. You reach INTO it when —
 |---|---|---|
 | `DecisionAppend` | `appendTo(stream, expectedVersion)` | CAS on the stream head; the caller stamps versions `expected+1..+N` and the store REFUSES a batch that claims anything else (`IncoherentDecisionVersions`) |
 | `FactAppend` | `appendAny(stream)` | no OCC; the store allocates a dense version range itself — a fact's position is never the producer's claim |
-| `StreamReader` | `retrieveAll` / `retrieveByFilter` / `safeHeadPosition` | bounded reads (pdo_pgsql buffers everything — never unbounded), explicit query filters, and the safe watermark below |
+| `StreamReader` | `retrieveAll` / `retrieveByFilter` / `committedHeadPosition` / `safeHeadPosition` | bounded reads (pdo_pgsql buffers everything — never unbounded), explicit query filters, the visible committed target, and the safe watermark below |
 
 A decision that loses the CAS throws `StaleVersion` (retryable-forward); the
 `UNIQUE (category, stream, version)` backstop throws `DuplicateVersion` (terminal). DBAL is raw at
@@ -74,6 +74,10 @@ relay and any transport-level consumer can never drift apart on how a row is rea
   atomically with its dedup mark; a batched sibling (`onceBatch`) amortizes the commit.
 
 ## Safe head
+
+`committedHeadPosition()` is the highest position visible as committed to the current statement. It
+is a freshness target only. A younger missing position can keep the scanner below it, so catch-up
+reads must never use it as their upper bound.
 
 `safeHeadPosition()` is the catch-up watermark: gap-scan over `sequence_no`, holes younger than the
 grace hold it, older ones are presumed aborted and stepped over. The safety is **bounded by the
@@ -153,3 +157,18 @@ the architecture gates and the full internal documentation live.
 
 *Pre-version: this package changes without deprecation cycles — pin a commit if you need
 stability, expect resets rather than migrations until the first tagged version.*
+
+## Partition names and existing children
+
+Partition provisioning identifies existing children by their schema, parent and full LIST bound.
+A correctly attached child remains usable under its existing name, including a name PostgreSQL
+truncated during an earlier provisioning. No automatic rename or data movement is performed.
+
+New children keep `event_store_p_<category>` when it fits `max_identifier_length`. Longer names
+use a shortened category plus a SHA-256 suffix within that server limit. Creation and the printed
+manual migration recipe share this naming rule. An incompatible relation occupying the generated
+name causes an explicit failure. Concurrent provisioning may fail on a competing DDL statement;
+retry after the other transaction commits.
+
+Rows already stored in DEFAULT still require the existing manual migration procedure. Correcting
+the naming rule does not move those rows into a new child automatically.

@@ -12,7 +12,7 @@ use Storm\Chronicler\Schema\EventStoreSchema;
 use Storm\Message\Header;
 
 use function count;
-use function implode;
+use function sprintf;
 
 /**
  * Every stored event carrying one of the given correlation ids, in `sequence_no` order.
@@ -24,11 +24,11 @@ use function implode;
  * serving it. Nothing here is caller-shaped: no column choice, no operator, no path.
  *
  * The rendered form is load-bearing and is not free to change. `EventStoreSchema` ships
- * `event_store_correlation_idx` on `header #>> '{__correlation_id}'`, and only two spellings resolve
- * to it, the literal path form and the `#>> string_to_array(:p, ',')` bound form used below. The
- * `->>` key form returns identical text, matches the index NOTHING, and scans the whole store
- * while every result still looks right; a comparison against a column pinned `COLLATE "C"` misses
- * it the same way.
+ * `event_store_correlation_idx` on `header #>> '{__correlation_id}'`. The fixed path is rendered
+ * from `Header::CorrelationId` as that literal expression, so PostgreSQL matches the index under
+ * custom and generic plans. The `->>` key form returns identical text, matches the index NOTHING,
+ * and scans the whole store while every result still looks right; a comparison against a column
+ * pinned `COLLATE "C"` misses it the same way.
  *
  * The set form is the contract, not a convenience: a lineage is resolved where it is known and
  * passed in whole. This filter traces the ids it is GIVEN and claims nothing beyond them, so it
@@ -42,11 +42,9 @@ final readonly class CorrelationFeedFilter implements QueryFilter
      * @param  list<string>  $correlationIds  matched by equality against the bound set; the filter
      *                                        validates its own emptiness rather than trusting a caller
      *                                        the analyser cannot see
-     * @param  positive-int  $limit
      *
-     * @throws InvalidArgumentException when the id set is empty; an empty set renders a predicate
-     *                                  matching nothing while reading as a filter that was merely
-     *                                  not narrow, and no caller means that
+     * @throws InvalidArgumentException when the id set is empty or the limit is not positive; either
+     *                                  case renders an empty trace that no caller means
      */
     public function __construct(
         private array $correlationIds,
@@ -54,6 +52,10 @@ final readonly class CorrelationFeedFilter implements QueryFilter
     ) {
         if (count($correlationIds) === 0) {
             throw new InvalidArgumentException('A correlation set cannot be empty: an empty set matches nothing, which no caller means.');
+        }
+
+        if ($limit < 1) {
+            throw new InvalidArgumentException('A correlation feed limit must be positive.');
         }
     }
 
@@ -63,8 +65,7 @@ final readonly class CorrelationFeedFilter implements QueryFilter
     #[Override]
     public function apply(QueryBuilder $qb): void
     {
-        $qb->andWhere("e.header #>> string_to_array(:correlationPath, ',') IN (:correlationIds)")
-            ->setParameter('correlationPath', implode(',', [Header::CorrelationId->value]))
+        $qb->andWhere(sprintf("e.header #>> '{%s}' IN (:correlationIds)", Header::CorrelationId->value))
             ->setParameter('correlationIds', $this->correlationIds, ArrayParameterType::STRING)
             ->orderBy('e.sequence_no', 'ASC')
             ->setMaxResults($this->limit);
