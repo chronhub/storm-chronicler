@@ -7,8 +7,9 @@ namespace Storm\Chronicler\Outbox;
 /**
  * One outbox row to write atomically with its event: the event's position `sequence_no`, its
  * `partitionKey` which is the qualified stream, so the relay preserves order within a partition and a
- * stuck row only blocks its own aggregate, its stored type and schema version, and the serialized
- * header and content as JSON strings.
+ * stuck row only blocks its own aggregate, and its stored type and schema version. No copy of the
+ * header or content: the row is a publication index, the store holds the payload and the relay
+ * reads it there in its claim.
  */
 final readonly class OutboxEntry
 {
@@ -17,7 +18,5 @@ final readonly class OutboxEntry
         public string $partitionKey,
         public string $type,
         public int $eventVersion,
-        public string $header,
-        public string $content,
     ) {}
 }

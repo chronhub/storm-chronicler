@@ -4,12 +4,17 @@ declare(strict_types=1);
 
 namespace Storm\Chronicler\SafeHead;
 
+use Closure;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Storm\Chronicler\Record\SequencePosition;
 use Storm\Chronicler\Schema\EventStoreSchema;
 use Storm\Chronicler\Store\PostgresEventStore;
+use Storm\Chronicler\Telemetry\NullSafeHeadObservability;
+use Storm\Chronicler\Telemetry\SafeHeadCrossingContext;
+use Storm\Chronicler\Telemetry\SafeHeadObservability;
 use Storm\Contracts\Chronicler\Position;
+use Throwable;
 
 /**
  * Computes the commit-order safe head, the highest position a filtered catch-up reader may pass
@@ -27,6 +32,13 @@ use Storm\Contracts\Chronicler\Position;
  * always-correct even with no ratchet. Under N daemons `tick()` elects ONE writer per cycle via an
  * advisory lock: the winner scans and ratchets, the rest read the floor, which is conservative, at
  * or below the true head, so a reader never skips.
+ *
+ * The grace test has no upper time bound. Normal appends omit `recorded_at`, leaving it to the
+ * database default `clock_timestamp()`. A backward server clock step can make a neighbor appear
+ * future-dated; explicit SQL outside the append contract can supply such a timestamp too. The gap
+ * stays young until the neighbor has aged beyond the grace relative to the server clock. An upper
+ * bound would exclude that neighbor and permit a skip over positions still in flight. `compute()`
+ * and `advance()` share this conservative predicate.
  *
  * Accepted residual, and the reason this is a grace-bounded watermark rather than an exact one: a
  * transaction that reserves a `sequence_no` then stays in-flight past the grace is presumed aborted
@@ -48,7 +60,7 @@ use Storm\Contracts\Chronicler\Position;
  * @see PostgresEventStore::safeHeadPosition()
  * @see EventStoreSchema  the `sequence_no` index this scan rides and the `event_store_high_water` cursor
  */
-final readonly class SafeHeadAdvancer
+final class SafeHeadAdvancer
 {
     /**
      * The `WITH` body shared by compute and advance: derives `w.watermark` from the live gap scan
@@ -65,18 +77,40 @@ final readonly class SafeHeadAdvancer
      * bad estimate once the statement goes generic after a few executions. `$floor` is the trusted
      * `event_store_high_water.position`, never user input.
      */
-    private static function watermarkCtes(int $floor): string
+    private static function watermarkCtes(int $floor, ?int $window = null): string
     {
-        /** @lang PostgreSQL */
+        // The bound, when the caller sets one, closes BOTH the tail and the fallback: a tail read up
+        // to floor + W with a fallback still reading the global head would step over a young gap
+        // sitting above the window, for good. With the fallback capped at floor + W the watermark
+        // never passes what the scan has seen, and a gap above the window is found by a later ratchet.
+        $ceiling = $window === null ? '' : sprintf(' AND e.sequence_no <= %d', $floor + $window);
+        // A gap is judged young by its UPPER neighbor, and a gap straddling the top of the window has
+        // that neighbor above it. Without it the scan ends on the last row of the window, or on the
+        // anchor alone when the window holds no row, sees no gap, and the fallback lifts the floor
+        // over positions nothing examined. The first committed row above the window joins `tail`,
+        // one index probe: a young straddling gap holds the watermark below it, an old one is
+        // stepped over by the capped fallback.
+        $beyond = $window === null ? '' : sprintf(
+            ' UNION ALL (SELECT e.sequence_no, e.recorded_at FROM event_store e WHERE e.sequence_no > %d ORDER BY e.sequence_no LIMIT 1)',
+            $floor + $window,
+        );
+        // `LEAST` ignores a NULL argument, so capping the head of an EMPTY store would answer the
+        // cap itself: a watermark over no row, and a floor climbing one window per ratchet above the
+        // positions the first events are about to take. The cap applies to a head that exists.
+        $fallback = $window === null
+            ? '(SELECT max(sequence_no) FROM event_store)'
+            : sprintf('(SELECT LEAST(%d, head.top) FROM (SELECT max(sequence_no) AS top FROM event_store) head WHERE head.top IS NOT NULL)', $floor + $window);
+
+        /* language=PostgreSQL */
         $template = <<<'SQL'
             tail AS (
                 -- committed rows above the floor (an in-flight row is invisible, so its absence is the gap),
                 -- plus a synthetic anchor at the floor so a gap right above the established region is seen
                 SELECT e.sequence_no, e.recorded_at
                 FROM event_store e
-                WHERE e.sequence_no > %1$d
+                WHERE e.sequence_no > %1$d%2$s
                 UNION ALL
-                SELECT %1$d, clock_timestamp()
+                SELECT %1$d, clock_timestamp()%4$s
             ),
             stepped AS (
                 SELECT sequence_no, recorded_at,
@@ -93,13 +127,13 @@ final readonly class SafeHeadAdvancer
             ),
             w AS (
                 SELECT COALESCE(
-                    (SELECT wall FROM young_gap),              -- hold below the first young gap
-                    (SELECT max(sequence_no) FROM event_store) -- none: safe to the committed head
+                    (SELECT wall FROM young_gap), -- hold below the first young gap
+                    %3$s                          -- none: safe to the committed head, or to the window's top
                 ) AS watermark
             )
             SQL;
 
-        return sprintf($template, $floor);
+        return sprintf($template, $floor, $ceiling, $fallback, $beyond);
     }
 
     /**
@@ -108,20 +142,21 @@ final readonly class SafeHeadAdvancer
      *
      * Splitting the read from the scan opens a window the single-statement `floor_pos` CTE did not
      * have: a concurrent ratchet can lift the floor between this read and the scan. It is
-     * correctness-safe on every path, since the scan yields the same watermark from any floor at or
-     * below it; a lower floor only lengthens the scanned tail, never changes the result, so a stale
-     * floor never causes a skip. On the `tick()` path the advisory-lock winner is the sole writer, so
-     * the floor cannot move at all, and the tail is exactly minimal. On the unlocked `compute()` path,
-     * for waiters and one-shot runners, the floor can be up to one ratchet stale, so the tail may be
-     * marginally longer, still far below the JIT cost crossover, so the no-JIT win holds; it self-heals
-     * on the next read. The worst case is a slightly longer scan, not a skip.
+     * correctness-safe on every path. The unbounded scan of `compute()` yields the same watermark
+     * from any floor at or below it; a lower floor only lengthens the scanned tail, never changes
+     * the result. The bounded scan of `ratchet()` yields a watermark that depends on the floor, at
+     * most `RATCHET_WINDOW` above it: a lower floor gives a LOWER watermark, conservative, so a stale
+     * floor never causes a skip there either, it costs one more ratchet. On the `tick()` path the
+     * advisory-lock winner is the sole writer, so the floor cannot move at all. On the unlocked
+     * `compute()` path, for waiters and one-shot runners, the floor can be up to one ratchet stale,
+     * so the tail may be marginally longer; it self-heals on the next read.
      *
      * @throws Exception on a DBAL failure of the singleton read
      */
     private function currentFloor(): int
     {
         return (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT COALESCE((SELECT position FROM event_store_high_water), 0)',
         );
     }
@@ -133,9 +168,24 @@ final readonly class SafeHeadAdvancer
      */
     private const string WRITER_LOCK_KEY = 'storm.safe_head.writer';
 
+    /**
+     * How many rows above the floor one ratchet reads at most. Every row of the tail costs a heap
+     * block, `recorded_at` living in no index, so an unbounded ratchet under a flood paid the whole
+     * distance floor to head on every tick, thirteen thousand blocks a call. The bound caps the
+     * call; it also caps how far one ratchet can advance, so the floor keeps up with the writers
+     * only while `RATCHET_WINDOW × ratchets per second` exceeds the append rate: the measured flood
+     * appends 6 500 rows a second under 21 elected ratchets a second, and 2 000 leaves a sixfold
+     * margin. A floor that stops keeping up shows as a growing lag of the catch-up watermark, never
+     * as a skip. The pure read never bounds itself: it has no floor to advance and returns the head.
+     */
+    public const int RATCHET_WINDOW = 2000;
+
+    private ?Closure $observation = null;
+
     public function __construct(
-        private Connection $connection,
-        private float $graceSeconds = 5.0,
+        private readonly Connection $connection,
+        private readonly float $graceSeconds = 5.0,
+        private readonly SafeHeadObservability $obs = new NullSafeHeadObservability,
     ) {}
 
     /**
@@ -147,7 +197,7 @@ final readonly class SafeHeadAdvancer
     public function compute(): ?Position
     {
         $value = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'WITH '.self::watermarkCtes($this->currentFloor()).' SELECT watermark FROM w',
             ['grace' => $this->graceSeconds],
         );
@@ -156,8 +206,9 @@ final readonly class SafeHeadAdvancer
     }
 
     /**
-     * Compute the safe head and ratchet the persisted floor to it, returning the freshly computed
-     * head. The upsert is conditional on `WHERE position < EXCLUDED.position`, so an idle cycle writes
+     * Compute the safe head over at most `RATCHET_WINDOW` rows above the floor and ratchet the
+     * persisted floor to it, returning the freshly computed head; a tail longer than the window is
+     * climbed one window per ratchet. The upsert is conditional on `WHERE position < EXCLUDED.position`, so an idle cycle writes
      * nothing, no hot-row MVCC churn on the singleton; it is monotone, and a NULL watermark on an empty
      * store leaves the floor untouched. Runs inside the caller's batch transaction where one is
      * active on this connection, a rollback then undoing the ratchet; under a read-model store
@@ -169,20 +220,64 @@ final readonly class SafeHeadAdvancer
      */
     public function advance(): ?Position
     {
-        $value = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
-            'WITH '.self::watermarkCtes($this->currentFloor()).', up AS ('
+        return $this->ratchet(false);
+    }
+
+    private function ratchet(bool $observe): ?Position
+    {
+        $floor = $this->currentFloor();
+        // Crossed gap portions stay inside `]floor, watermark]`; a ratchet may cross several holes.
+        // `prev_seq < watermark` excludes the young gap that holds the watermark at its lower edge
+        // and every gap above it. Observation delivery still depends on movement and commit.
+        $row = $this->connection->fetchAllAssociative(
+            'WITH '.self::watermarkCtes($floor, self::RATCHET_WINDOW).', crossed AS ('
+            .'SELECT prev_seq + 1 AS first, LEAST(sequence_no - 1, (SELECT watermark FROM w)) AS last FROM stepped '
+            .'WHERE prev_seq IS NOT NULL AND sequence_no > prev_seq + 1 '
+            .'AND prev_seq < (SELECT watermark FROM w)'
+            .'), up AS ('
             .'INSERT INTO event_store_high_water (id, position) '
             .'SELECT 1, watermark FROM w WHERE watermark IS NOT NULL '
-            .'ON CONFLICT (id) DO UPDATE SET '
-            .'position = EXCLUDED.position, '
-            .'updated_at = clock_timestamp() '
-            .'WHERE event_store_high_water.position < EXCLUDED.position '
-            .') SELECT watermark FROM w',
+            .'ON CONFLICT (id) DO UPDATE SET position = EXCLUDED.position, updated_at = clock_timestamp() '
+            .'WHERE event_store_high_water.position < EXCLUDED.position RETURNING position'
+            .') SELECT watermark, EXISTS(SELECT 1 FROM up) AS moved, '
+            .'(SELECT count(*) FROM crossed) AS gap_count, '
+            .'(SELECT COALESCE(sum(last - first + 1), 0) FROM crossed) AS missing_positions, '
+            ."(SELECT COALESCE(json_agg(json_build_object('from', first, 'to', last)), '[]'::json) "
+            .'FROM (SELECT first, last FROM crossed ORDER BY first LIMIT 5) sample) AS ranges FROM w',
             ['grace' => $this->graceSeconds],
-        );
+        )[0];
+        if ($observe && $row['moved'] && (int) $row['gap_count'] > 0) {
+            $context = new SafeHeadCrossingContext(
+                $floor, (int) $row['watermark'], $this->graceSeconds,
+                (int) $row['gap_count'], (int) $row['missing_positions'],
+                json_decode((string) $row['ranges'], true, flags: JSON_THROW_ON_ERROR),
+                (int) $row['gap_count'] > 5,
+            );
+            $this->observation = function () use ($context): void {
+                if ($this->connection->isTransactionActive()) {
+                    return;
+                }
+                try {
+                    $this->obs->recordCrossing($context);
+                } catch (Throwable) {
+                }
+            };
+        }
 
-        return $this->toPosition($value);
+        return $this->toPosition($row['watermark']);
+    }
+
+    /**
+     * Transfers the notification to its batch attempt; callers must discard it on rollback.
+     *
+     * @return Closure(): void|null
+     */
+    public function takeObservation(): ?Closure
+    {
+        $observation = $this->observation;
+        $this->observation = null;
+
+        return $observation;
     }
 
     /**
@@ -206,11 +301,16 @@ final readonly class SafeHeadAdvancer
         // short transaction restores the exclusion for the scan-and-ratchet; in the un-split
         // wiring a transaction is already active and this branch never runs, the lock holding to
         // the batch commit as before.
+        $this->observation = null;
         if (! $this->connection->isTransactionActive()) {
-            return $this->connection->transactional(fn (): ?Position => $this->winsWriterLock() ? $this->advance() : $this->read());
+            $position = $this->connection->transactional(fn (): ?Position => $this->winsWriterLock() ? $this->ratchet(true) : $this->read());
+            $observation = $this->takeObservation();
+            $observation?->__invoke();
+
+            return $position;
         }
 
-        return $this->winsWriterLock() ? $this->advance() : $this->read();
+        return $this->winsWriterLock() ? $this->ratchet(true) : $this->read();
     }
 
     /**
@@ -224,7 +324,7 @@ final readonly class SafeHeadAdvancer
     public function read(): ?Position
     {
         $value = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT position FROM event_store_high_water WHERE id = 1',
         );
 
@@ -242,7 +342,7 @@ final readonly class SafeHeadAdvancer
     private function winsWriterLock(): bool
     {
         return (bool) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))',
             ['key' => self::WRITER_LOCK_KEY],
         );

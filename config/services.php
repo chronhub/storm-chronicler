@@ -50,6 +50,7 @@ return static function (ContainerConfigurator $container): void {
             dirname(__DIR__).'/Store/InsertChunk.php', // one INSERT statement's slice, a value
             // per-call observation payloads handed to the telemetry port, not services
             dirname(__DIR__).'/Telemetry/AppendContext.php',
+            dirname(__DIR__).'/Telemetry/SafeHeadCrossingContext.php',
             dirname(__DIR__).'/Telemetry/LoadContext.php',
             dirname(__DIR__).'/Telemetry/OccConflictContext.php',
             // opt-in on purpose: the bundle wires the category existence cache only when

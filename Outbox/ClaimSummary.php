@@ -36,6 +36,14 @@ final readonly class ClaimSummary
         return new self($count, $max);
     }
 
+    /**
+     * @return list<string> the claimed partitions in first-seen order, the order the claim walks
+     */
+    public function partitions(): array
+    {
+        return array_keys($this->count);
+    }
+
     public function countFor(string $partition): int
     {
         return $this->count[$partition] ?? 0;

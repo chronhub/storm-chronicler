@@ -21,9 +21,11 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * marks a `(consumer, message-id)` already processed; its value expires once redelivery is no longer
  * possible, past the broker's retry or visibility horizon, so old rows are safe to drop.
  *
- * Batched: DELETE WHERE processed_at < age, in LIMIT-capped batches so it never holds a long lock.
- * Idempotent. Every row is terminal by nature, a row is a consumed message, so there is no status to
- * scope, only age. Pick --before comfortably beyond your broker's max redelivery window.
+ * Batched, in LIMIT-capped statements so it never holds a long lock; idempotent. A v7 key carries its
+ * minting instant, so its age is read from the key and the rows go by a range of the primary index;
+ * any other key goes by `processed_at`. The age therefore counts from the MINTING of the message, not
+ * its consumption: a message consumed after a queue lag retires lag earlier than `processed_at` says.
+ * Pick --before beyond your broker's max redelivery window PLUS the longest queue lag you accept.
  *
  * --before <7d|48h|90m> is required, so there is no accidental prune-all; --dry-run counts without
  * deleting; --batch caps each statement.
@@ -47,7 +49,7 @@ final class InboxPruneCommand extends Command
     #[Override]
     protected function configure(): void
     {
-        $this->addOption('before', null, InputOption::VALUE_REQUIRED, 'Prune dedup records older than this (e.g. 7d, 48h) — required');
+        $this->addOption('before', null, InputOption::VALUE_REQUIRED, 'Prune dedup records older than this (e.g. 7d, 48h), the age of a v7 message id being its minting instant: exceed the redelivery window plus the longest queue lag — required');
         $this->addOption('batch', null, InputOption::VALUE_REQUIRED, 'Rows deleted per batch', '1000');
         $this->addOption('dry-run', null, InputOption::VALUE_NONE, 'Count what would be pruned, delete nothing');
     }

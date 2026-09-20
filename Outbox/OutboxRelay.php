@@ -8,6 +8,7 @@ use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Doctrine\DBAL\ParameterType;
+use JsonException;
 use Psr\Log\LoggerInterface;
 use Storm\Chronicler\Console\RelayOutboxCommand;
 use Storm\Chronicler\Record\StoredEventReader;
@@ -20,7 +21,8 @@ use Storm\Support\OutboxDisposal;
 use Throwable;
 
 /**
- * Drains the outbox: reads the `pending` rows that are DUE, locked with `SKIP LOCKED` so parallel
+ * Drains the outbox: reads the `pending` rows that are DUE, their payload joined from `event_store`
+ * since the row names the event and carries no copy of it, locked with `SKIP LOCKED` so parallel
  * relays don't collide and `ORDER BY id` so insertion order, hence per-aggregate version order, is
  * kept, reconstructs each Message, publishes it, then disposes of the row at the end of the batch in
  * one statement for the whole batch, inside the same drain transaction. Disposal deletes by default,
@@ -234,6 +236,13 @@ final readonly class OutboxRelay
             // rows a worker already read, not the partition, so a sibling picks up the tail and races.
             // The advisory alone wouldn't either: the claim is rows-first, so the owner may hold the
             // TAIL while a sibling row-locked the head; hence the pending-head check below the claim.
+            // The locks and the probes go to the server ONCE per tick, whatever the partition count:
+            // a batch spans hundreds of aggregate streams, and a round trip per partition made the
+            // probe the first cost of a flood. Locks are taken in first-seen order, the order the loop
+            // walks; a partition locked here and then found blocked holds its lock to the commit,
+            // exactly as the lazy lock did, since the lock preceded the probe there too.
+            $ownership = $this->ownPartitions($connection, $claim->partitions());
+            $probes = $this->probePartitions($connection, $claim, array_keys(array_filter($ownership)));
             $owned = [];
 
             // Per partition, the lowest pending row that is NOT due yet, or null. Read with the head
@@ -254,7 +263,7 @@ final readonly class OutboxRelay
                 }
 
                 if (! isset($owned[$partition])) {
-                    $owned[$partition] = $this->tryOwnPartition($connection, $partition);
+                    $owned[$partition] = $ownership[$partition] ?? false;
 
                     if (! $owned[$partition]) {
                         $blocked[$partition] = true; // another relay owns this partition this tick
@@ -262,7 +271,7 @@ final readonly class OutboxRelay
                         continue;
                     }
 
-                    $probe = $this->probePartition($connection, $partition, $claim->maxFor($partition));
+                    $probe = $probes[$partition] ?? new PartitionProbe(null, null, 0);
                     $coolingFloor[$partition] = $probe->coolingFloor;
 
                     if (! $probe->headIsOurs($row->id)) {
@@ -305,6 +314,15 @@ final readonly class OutboxRelay
                     $blocked[$partition] = true;
                     $coldBlocked[$partition] = true;
                     $refusedCold[] = $row->id;
+
+                    continue;
+                }
+
+                if ($row->vanished) {
+                    // The row outlived its event: a storage fault to name, never a message to publish
+                    // empty, never a head to leave in place; the partition keeps draining behind it.
+                    $this->deadLetter($connection, $row->raw, OutboxEventVanished::at($partition, $row->raw['position']));
+                    $failed++;
 
                     continue;
                 }
@@ -505,13 +523,15 @@ final readonly class OutboxRelay
         $rows = $connection->fetchAllAssociative(
             /** @lang PostgreSQL */
             <<<'SQL'
-                SELECT id, partition_key, partition_key AS stream, type, event_version, header, content, attempts
-                FROM es_outbox
-                WHERE status = 'pending'
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())
-                ORDER BY id
+                SELECT o.id, o.position, o.partition_key, o.partition_key AS stream, o.type, o.event_version, o.attempts,
+                       e.header, e.content, CAST(e.sequence_no IS NULL AS integer) AS vanished
+                FROM es_outbox o
+                LEFT JOIN event_store e ON e.category = split_part(o.partition_key, '-', 1) AND e.sequence_no = o.position
+                WHERE o.status = 'pending'
+                  AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= clock_timestamp())
+                ORDER BY o.id
                 LIMIT :batch
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE OF o SKIP LOCKED
                 SQL,
             ['batch' => $batch],
             ['batch' => ParameterType::INTEGER],
@@ -521,17 +541,32 @@ final readonly class OutboxRelay
     }
 
     /**
-     * Claim the partition for this tick with a transaction-scoped advisory lock.
+     * Claim the tick's partitions with transaction-scoped advisory locks, one statement for all of
+     * them, in the order given, which is the order the drain walks. A `try` lock never waits, so
+     * taking many in one statement cannot deadlock; a partition another relay owns this tick reads
+     * false and is skipped, its rows left for that relay or the next tick.
+     *
+     * @param  list<string>  $partitions
+     * @return array<string, bool> owned, keyed by partition
      *
      * @throws Exception on a DBAL failure of the lock attempt
+     * @throws JsonException when a partition key cannot be encoded
      */
-    private function tryOwnPartition(Connection $connection, string $partition): bool
+    private function ownPartitions(Connection $connection, array $partitions): array
     {
-        return (bool) $connection->fetchOne(
-            /** @lang PostgreSQL */
-            'SELECT pg_try_advisory_xact_lock(hashtextextended(:partition, 0))',
-            ['partition' => $partition],
+        if ($partitions === []) {
+            return [];
+        }
+
+        $rows = $connection->fetchAllKeyValue(
+            /* language=PostgreSQL */
+            'SELECT p.partition_key, pg_try_advisory_xact_lock(hashtextextended(p.partition_key, 0))
+             FROM jsonb_array_elements_text(CAST(:partitions AS jsonb)) WITH ORDINALITY AS p(partition_key, n)
+             ORDER BY p.n',
+            ['partitions' => json_encode($partitions, JSON_THROW_ON_ERROR)],
         );
+
+        return array_map(static fn (mixed $owned): bool => (bool) $owned, $rows);
     }
 
     /**
@@ -559,33 +594,51 @@ final readonly class OutboxRelay
      * newer than our first. More due rows in the window than the claim holds means one is not
      * ours; publishing the window would jump over it.
      *
+     * One statement for every partition the tick owns, each answered by its own row; a partition
+     * with no pending row answers nothing and reads as an empty probe.
+     *
+     * @param  list<string>  $partitions  the owned partitions, in claim order
+     * @return array<string, PartitionProbe> keyed by partition, absent when it holds no pending row
+     *
      * @throws Exception on a DBAL failure of the probe
+     * @throws JsonException when a claim cannot be encoded
      */
-    private function probePartition(Connection $connection, string $partition, int $maxClaimed): PartitionProbe
+    private function probePartitions(Connection $connection, ClaimSummary $claim, array $partitions): array
     {
-        $probe = $connection->fetchAssociative(
-            /** @lang PostgreSQL */
-            <<<'SQL'
-                SELECT min(id) AS head,
-                       min(id) FILTER (WHERE next_attempt_at > clock_timestamp()) AS cooling_floor,
-                       count(*) FILTER (WHERE id <= :max_claimed
-                                          AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())) AS due_in_window
-                FROM es_outbox
-                WHERE partition_key = :partition AND status = 'pending'
-                SQL,
-            ['partition' => $partition, 'max_claimed' => $maxClaimed],
-            ['max_claimed' => ParameterType::INTEGER],
-        );
-
-        if ($probe === false) {
-            return new PartitionProbe(null, null, 0);
+        if ($partitions === []) {
+            return [];
         }
 
-        return new PartitionProbe(
-            $probe['head'] === null ? null : (int) $probe['head'],
-            $probe['cooling_floor'] === null ? null : (int) $probe['cooling_floor'],
-            (int) $probe['due_in_window'],
+        $claims = [];
+        foreach ($partitions as $partition) {
+            $claims[] = ['partition_key' => $partition, 'max_claimed' => $claim->maxFor($partition)];
+        }
+
+        $rows = $connection->fetchAllAssociative(
+            /* language=PostgreSQL */
+            <<<'SQL'
+                SELECT o.partition_key,
+                       min(o.id) AS head,
+                       min(o.id) FILTER (WHERE o.next_attempt_at > clock_timestamp()) AS cooling_floor,
+                       count(*) FILTER (WHERE o.id <= c.max_claimed
+                                          AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= clock_timestamp())) AS due_in_window
+                FROM jsonb_to_recordset(CAST(:claims AS jsonb)) AS c(partition_key text, max_claimed bigint)
+                JOIN es_outbox o ON o.partition_key = c.partition_key AND o.status = 'pending'
+                GROUP BY o.partition_key
+                SQL,
+            ['claims' => json_encode($claims, JSON_THROW_ON_ERROR)],
         );
+
+        $probes = [];
+        foreach ($rows as $row) {
+            $probes[(string) $row['partition_key']] = new PartitionProbe(
+                $row['head'] === null ? null : (int) $row['head'],
+                $row['cooling_floor'] === null ? null : (int) $row['cooling_floor'],
+                (int) $row['due_in_window'],
+            );
+        }
+
+        return $probes;
     }
 
     /**
@@ -607,13 +660,16 @@ final readonly class OutboxRelay
 
         $sql = match ($this->disposal) {
             OutboxDisposal::Delete => /** @lang PostgreSQL */ 'DELETE FROM es_outbox WHERE id IN (:ids)',
-            OutboxDisposal::Archive => /** @lang PostgreSQL */ <<<'SQL'
+            OutboxDisposal::Archive => /* language=PostgreSQL */ <<<'SQL'
                 WITH moved AS (
                     DELETE FROM es_outbox WHERE id IN (:ids)
-                    RETURNING id, position, partition_key, type, event_version, header, content, attempts, occurred_at
+                    RETURNING id, position, partition_key, type, event_version, attempts, occurred_at
                 )
                 INSERT INTO es_outbox_archive (id, position, partition_key, type, event_version, header, content, attempts, occurred_at)
-                SELECT id, position, partition_key, type, event_version, header, content, attempts, occurred_at FROM moved
+                SELECT m.id, m.position, m.partition_key, m.type, m.event_version,
+                       COALESCE(e.header, '{}'::jsonb), COALESCE(e.content, '{}'::jsonb), m.attempts, m.occurred_at
+                FROM moved m
+                LEFT JOIN event_store e ON e.category = split_part(m.partition_key, '-', 1) AND e.sequence_no = m.position
                 SQL,
         };
 

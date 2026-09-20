@@ -58,18 +58,18 @@ final readonly class DbalOutboxWriter implements OutboxWriter
                 $params[] = $entry->partitionKey;
                 $params[] = $entry->type;
                 $params[] = $entry->eventVersion;
-                $params[] = $entry->header;
-                $params[] = $entry->content;
             }
 
+            // The row names the event and carries no copy of its payload: `header` and `content` keep
+            // their empty default, the relay reads both from the store in its claim (WP-B′, #585).
             $placeholders = $chunk
                     |> count(...)
-                    |> (static fn ($x) => array_fill(0, $x, '(?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb))'))
+                    |> (static fn ($x) => array_fill(0, $x, '(?, ?, ?, ?)'))
                     |> (static fn ($x) => implode(', ', $x));
 
             $this->connection->executeStatement(
-                /** @lang PostgreSQL */
-                'INSERT INTO es_outbox (position, partition_key, type, event_version, header, content)
+                /* language=PostgreSQL */
+                'INSERT INTO es_outbox (position, partition_key, type, event_version)
                  VALUES '.$placeholders,
                 $params,
             );

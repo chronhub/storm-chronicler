@@ -10,11 +10,16 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Storm\Chronicler\Inbox\DbalBatchInboxStore;
+use Storm\Chronicler\Inbox\InboxConsumers;
 use Storm\Chronicler\Inbox\InboxItem;
+use Storm\Chronicler\Inbox\InboxKey;
 
 use function array_key_exists;
+use function array_map;
+use function bin2hex;
 use function count;
 use function range;
+use function sort;
 use function sprintf;
 
 /**
@@ -38,7 +43,7 @@ final class DbalBatchInboxStoreTest extends TestCase
         $order = [];
         $connection = $this->connection(insertedFor: static fn (string $id): bool => true);
 
-        $ran = new DbalBatchInboxStore($connection)->onceBatch('events', [
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', [
             new InboxItem('a', function () use (&$order): void {
                 $order[] = 'a';
             }),
@@ -59,9 +64,9 @@ final class DbalBatchInboxStoreTest extends TestCase
     {
         $order = [];
         // 'b' is already recorded, so absent from the RETURNING set.
-        $connection = $this->connection(insertedFor: static fn (string $id): bool => $id !== 'b');
+        $connection = $this->connection(insertedFor: static fn (string $key): bool => $key !== bin2hex(InboxKey::encode('b')));
 
-        $ran = new DbalBatchInboxStore($connection)->onceBatch('events', [
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', [
             new InboxItem('a', function () use (&$order): void {
                 $order[] = 'a';
             }),
@@ -83,7 +88,7 @@ final class DbalBatchInboxStoreTest extends TestCase
         $runs = 0;
         $connection = $this->connection(insertedFor: static fn (string $id): bool => true);
 
-        $ran = new DbalBatchInboxStore($connection)->onceBatch('events', [
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', [
             new InboxItem('x', function () use (&$runs): void {
                 $runs++;
             }),
@@ -103,7 +108,7 @@ final class DbalBatchInboxStoreTest extends TestCase
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())->method('transactional');
 
-        $this->assertSame([], new DbalBatchInboxStore($connection)->onceBatch('events', []));
+        $this->assertSame([], new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', []));
     }
 
     // -------------------------------------------------------------------------
@@ -117,7 +122,7 @@ final class DbalBatchInboxStoreTest extends TestCase
         $connection = $this->connection(insertedFor: static fn (string $id): bool => true);
 
         try {
-            new DbalBatchInboxStore($connection)->onceBatch('events', [
+            new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', [
                 new InboxItem('a', function () use (&$order): void {
                     $order[] = 'a';
                 }),
@@ -148,7 +153,7 @@ final class DbalBatchInboxStoreTest extends TestCase
             statements: $statements,
         );
 
-        new DbalBatchInboxStore($connection)->onceBatch('events', $this->items(256));
+        new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', $this->items(256));
 
         $this->assertSame(1, $statements);
     }
@@ -162,7 +167,7 @@ final class DbalBatchInboxStoreTest extends TestCase
             statements: $statements,
         );
 
-        $ran = new DbalBatchInboxStore($connection)->onceBatch('events', $this->items(1001));
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', $this->items(1001));
 
         $this->assertSame(2, $statements);       // 1000 + 1
         $this->assertCount(1001, $ran);          // every item still answered
@@ -176,6 +181,7 @@ final class DbalBatchInboxStoreTest extends TestCase
         $connection = $this->createStub(Connection::class);
         $connection->method('transactional')
             ->willReturnCallback(static fn (Closure $work): mixed => $work($connection));
+        $connection->method('fetchOne')->willReturn(1);
         $connection->method('fetchFirstColumn')
             ->willReturnCallback(static function (string $sql, array $params) use (&$capturedParams): array {
                 $capturedParams = $params;
@@ -183,14 +189,17 @@ final class DbalBatchInboxStoreTest extends TestCase
                 return ['msg-a', 'msg-b', 'msg-c'];
             });
 
-        $store = new DbalBatchInboxStore($connection);
+        $store = new DbalBatchInboxStore($connection, new InboxConsumers($connection));
         $store->onceBatch('events', [
             new InboxItem('msg-c', static function (): void {}),
             new InboxItem('msg-a', static function (): void {}),
             new InboxItem('msg-b', static function (): void {}),
         ]);
 
-        $this->assertSame(['events', 'msg-a', 'events', 'msg-b', 'events', 'msg-c'], $capturedParams);
+        // the keys travel in hex, sorted as the index sorts them, and the consumer as its registry id
+        $keys = array_map(static fn (string $id): string => bin2hex(InboxKey::encode($id)), ['msg-a', 'msg-b', 'msg-c']);
+        sort($keys, SORT_STRING);
+        $this->assertSame([1, $keys[0], 1, $keys[1], 1, $keys[2]], $capturedParams);
     }
 
     // -------------------------------------------------------------------------
@@ -200,7 +209,8 @@ final class DbalBatchInboxStoreTest extends TestCase
     /**
      * A Connection whose transactional() runs the closure inline and whose fetchFirstColumn mirrors the
      * multi-VALUES `ON CONFLICT DO NOTHING RETURNING message_id`: positional params come as
-     * [consumer, id, consumer, id, …]; an id is returned iff $insertedFor says fresh AND it was not already
+     * [consumer, key, consumer, key, …], the keys in hex as the store sends them; a key is returned iff
+     * $insertedFor says fresh AND it was not already
      * inserted earlier in the same statement or batch, PostgreSQL's intra-statement DO NOTHING.
      *
      * @param  Closure(string): bool  $insertedFor
@@ -212,6 +222,8 @@ final class DbalBatchInboxStoreTest extends TestCase
         $connection = $this->createStub(Connection::class);
         $connection->method('transactional')
             ->willReturnCallback(static fn (Closure $work): mixed => $work($connection));
+        // the registry's one read: the consumer 'events' is id 1 in every fake
+        $connection->method('fetchOne')->willReturn(1);
         $connection->method('fetchFirstColumn')
             ->willReturnCallback(static function (string $sql, array $params) use ($insertedFor, &$recorded, &$statements): array {
                 $statements++;

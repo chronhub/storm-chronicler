@@ -251,9 +251,9 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         } catch (UniqueConstraintViolationException) {
             // No lastVersion() read here: the UNIQUE violation ABORTED the surrounding transaction,
             // 25P02, so any further query would explode into a StorageFailure masking this throw.
-            // The head already moved to $newVersion in this very tx, by CAS advance or bump; that
-            // IS the actual head as this writer saw it.
-            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category, $occExpected, $newVersion, 'duplicate'));
+            // The head this writer moved to $newVersion goes back with the abort, so the head that
+            // stands is the expected one; that is what the conflict reports.
+            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category, $occExpected, $occExpected, 'duplicate'));
 
             throw DuplicateVersion::forStream($name);
         }
@@ -407,8 +407,6 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
                 $streamName->toString(),
                 (string) $row[SerializedMessage::TYPE],
                 (int) $row['event_version'],
-                (string) $row[SerializedMessage::HEADER],
-                (string) $row[SerializedMessage::CONTENT],
             );
         }
 

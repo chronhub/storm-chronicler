@@ -11,15 +11,18 @@ use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 use function array_chunk;
 use function array_fill;
+use function array_values;
+use function bin2hex;
 use function count;
 use function implode;
+use function sort;
 
 /**
  * Default BatchInboxStore: records every `(consumer, message_id)` and runs each handler inside one
  * DBAL transaction, with the whole batch's dedup rows written by a single multi-VALUES INSERT.
  *
- * The dedup gate is `INSERT … ON CONFLICT DO NOTHING RETURNING message_id`: the RETURNING set contains
- * exactly the rows that were actually inserted, the fresh messages. An id absent from the set was
+ * The dedup gate is `INSERT … ON CONFLICT DO NOTHING RETURNING message_id`, the keys in hex both ways: the
+ * RETURNING set contains exactly the rows that were actually inserted, the fresh messages. A key absent from the set was
  * already recorded, in an earlier batch or an earlier occurrence in THIS batch; `DO NOTHING` also
  * absorbs an intra-statement duplicate, unlike `DO UPDATE` which would refuse to affect a row twice.
  * Handlers then run in delivery order, never in RETURNING order; a fresh id is consumed on use so a
@@ -42,6 +45,7 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
 {
     public function __construct(
         private Connection $connection,
+        private InboxConsumers $consumers,
     ) {}
 
     /**
@@ -55,22 +59,27 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
             return [];
         }
 
+        // resolved BEFORE the transaction, so a first registration autocommits and is cacheable
+        $consumerId = $this->consumers->id($consumer);
+
         return $this->connection->transactional(
-            function (Connection $tx) use ($consumer, $items): array {
-                $fresh = $this->recordFresh($tx, $consumer, $items);
+            function (Connection $tx) use ($consumerId, $items): array {
+                [$fresh, $keys] = $this->recordFresh($tx, $consumerId, $items);
 
                 $ran = [];
 
                 foreach ($items as $item) {
-                    if (! isset($fresh[$item->messageId])) {
+                    $key = $keys[$item->messageId];
+                    if (! isset($fresh[$key])) {
                         $ran[] = false;
 
                         continue;
                     }
 
-                    // Consume on use: an intra-batch duplicate finds its id already spent and is
-                    // reported false, exactly like the per-row ON CONFLICT gate would answer.
-                    unset($fresh[$item->messageId]);
+                    // Consume on use, BY KEY: an intra-batch duplicate, or two spellings of one id
+                    // that encode to one key, find it already spent and are reported false, exactly
+                    // like the per-row ON CONFLICT gate would answer.
+                    unset($fresh[$key]);
 
                     ($item->handler)();
 
@@ -83,47 +92,55 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
     }
 
     /**
-     * One multi-VALUES dedup INSERT for the whole batch, chunked; the RETURNING set is the fresh ids.
+     * One multi-VALUES dedup INSERT for the whole batch, chunked; the RETURNING set is the fresh keys.
      *
      * @param  list<InboxItem>  $items
-     * @return array<string, true> the message ids actually inserted, as a set
+     * @return array{array<string, true>, array<string, string>} the keys actually inserted, as a set of
+     *                                                           hex, and every item's key by message id
      *
      * @throws Exception on a DBAL failure recording the inbox rows
      */
-    private function recordFresh(Connection $tx, string $consumer, array $items): array
+    private function recordFresh(Connection $tx, int $consumerId, array $items): array
     {
-        $fresh = [];
-        $sortedItems = $items;
-        usort($sortedItems, static fn (InboxItem $a, InboxItem $b): int => strcmp($a->messageId, $b->messageId));
+        // the binary keys travel as hex and come back as hex: one text placeholder per key, so the
+        // multi-VALUES statement needs no binary parameter typing, and the RETURNING set reads as
+        // plain strings; sorted on the key, the index order, so two batches lock rows the same way
+        $keys = [];
+        foreach ($items as $item) {
+            $keys[$item->messageId] ??= bin2hex(InboxKey::encode($item->messageId));
+        }
+        $sortedKeys = array_values($keys);
+        sort($sortedKeys, SORT_STRING);
 
-        foreach (array_chunk($sortedItems, InsertChunk::ROWS) as $chunk) {
+        $fresh = [];
+        foreach (array_chunk($sortedKeys, InsertChunk::ROWS) as $chunk) {
             $params = [];
 
-            foreach ($chunk as $item) {
-                $params[] = $consumer;
-                $params[] = $item->messageId;
+            foreach ($chunk as $key) {
+                $params[] = $consumerId;
+                $params[] = $key;
             }
 
             $placeholders = $chunk
                     |> count(...)
-                    |> (static fn ($x) => array_fill(0, $x, '(?, ?)'))
+                    |> (static fn ($x) => array_fill(0, $x, "(?, decode(?, 'hex'))"))
                     |> (static fn ($x) => implode(', ', $x));
 
             $inserted = $tx->fetchFirstColumn(
                 /** @lang PostgreSQL */
                 // the conflict target is NAMED: only the dedup key may absorb a violation into
                 // "already processed"; any future constraint on the table stays loud
-                'INSERT INTO es_inbox (consumer, message_id) VALUES '.$placeholders.'
-                 ON CONFLICT (consumer, message_id) DO NOTHING
-                 RETURNING message_id',
+                'INSERT INTO es_inbox (consumer_id, message_id) VALUES '.$placeholders.'
+                 ON CONFLICT (consumer_id, message_id) DO NOTHING
+                 RETURNING encode(message_id, \'hex\')',
                 $params,
             );
 
-            foreach ($inserted as $messageId) {
-                $fresh[(string) $messageId] = true;
+            foreach ($inserted as $key) {
+                $fresh[(string) $key] = true;
             }
         }
 
-        return $fresh;
+        return [$fresh, $keys];
     }
 }

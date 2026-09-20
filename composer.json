@@ -16,7 +16,8 @@
         "psr/log": "^3.0",
         "symfony/console": "^8.1",
         "symfony/dependency-injection": "^8.1",
-        "symfony/string": "^8.1"
+        "symfony/string": "^8.1",
+        "symfony/uid": "^8.1"
     },
     "require-dev": {
         "chronhub/storm-symfony": "self.version",

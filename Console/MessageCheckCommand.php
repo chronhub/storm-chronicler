@@ -171,11 +171,11 @@ final class MessageCheckCommand extends Command
             $aliasString = (string) $alias;
             if (trim($aliasString) === '') {
                 $location = sprintf('events[%d]', $index);
-                $io->error(OutputFormatter::escape(sprintf(
+                $io->error(sprintf(
                     'The catalogue at "%s" contains an invalid entry at %s: alias cannot be empty; the message contract was not judged.',
                     $path,
                     $location,
-                )));
+                ));
 
                 return null;
             }
@@ -188,12 +188,12 @@ final class MessageCheckCommand extends Command
                 [$suffix, $reason] = $diagnosis;
                 $aliasKey = (string) json_encode($aliasString, JSON_UNESCAPED_SLASHES);
                 $location = sprintf('events[%s]%s', $aliasKey, $suffix);
-                $io->error(OutputFormatter::escape(sprintf(
+                $io->error(sprintf(
                     'The catalogue at "%s" contains an invalid entry at %s: %s; the message contract was not judged.',
                     $path,
                     $location,
                     $reason,
-                )));
+                ));
 
                 return null;
             }
@@ -210,12 +210,12 @@ final class MessageCheckCommand extends Command
         $diagnosis = self::diagnoseAliasClaims($events);
         if ($diagnosis !== null) {
             [$location, $reason] = $diagnosis;
-            $io->error(OutputFormatter::escape(sprintf(
+            $io->error(sprintf(
                 'The catalogue at "%s" contains an invalid entry at %s: %s; the message contract was not judged.',
                 $path,
                 $location,
                 $reason,
-            )));
+            ));
 
             return null;
         }

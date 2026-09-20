@@ -13,12 +13,14 @@ final readonly class OutboxRow
 {
     /**
      * @param  array<string, mixed>  $raw
+     * @param  bool  $vanished  whether the event the row names is gone from the store, read by the claim's left join
      */
     public function __construct(
         public int $id,
         public string $partition,
         public int $attempts,
         public array $raw,
+        public bool $vanished = false,
     ) {}
 
     /**
@@ -26,6 +28,6 @@ final readonly class OutboxRow
      */
     public static function of(array $raw): self
     {
-        return new self((int) $raw['id'], (string) $raw['partition_key'], (int) $raw['attempts'], $raw);
+        return new self((int) $raw['id'], (string) $raw['partition_key'], (int) $raw['attempts'], $raw, (int) ($raw['vanished'] ?? 0) === 1);
     }
 }
