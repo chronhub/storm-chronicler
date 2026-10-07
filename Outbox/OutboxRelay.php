@@ -12,12 +12,15 @@ use JsonException;
 use Psr\Log\LoggerInterface;
 use Storm\Chronicler\Console\RelayOutboxCommand;
 use Storm\Chronicler\Record\StoredEventReader;
+use Storm\Chronicler\Store\RetryEventStore;
 use Storm\Contracts\Chronicler\UndecodableRow;
+use Storm\Contracts\Random\Jitter;
 use Storm\Contracts\Serializer\SerializationExceptionContract;
 use Storm\Message\Message;
 use Storm\Support\Error\AuditDigest;
 use Storm\Support\Error\TransientFailure;
 use Storm\Support\OutboxDisposal;
+use Storm\Support\Random\NativeJitter;
 use Throwable;
 
 /**
@@ -161,6 +164,7 @@ final readonly class OutboxRelay
          * and two columns on a row. Null logs nothing, for standalone use.
          */
         private ?LoggerInterface $logger = null,
+        private Jitter $jitter = new NativeJitter,
     ) {}
 
     /**
@@ -241,8 +245,15 @@ final readonly class OutboxRelay
             // probe the first cost of a flood. Locks are taken in first-seen order, the order the loop
             // walks; a partition locked here and then found blocked holds its lock to the commit,
             // exactly as the lazy lock did, since the lock preceded the probe there too.
-            $ownership = $this->ownPartitions($connection, $claim->partitions());
-            $probes = $this->probePartitions($connection, $claim, array_keys(array_filter($ownership)));
+            // the owned partitions come from the claim's own strings, never from the keys of
+            // `$ownership`, which PHP turns into integers for a key like `42`
+            $partitions = $claim->partitions();
+            $ownership = $this->ownPartitions($connection, $partitions);
+            $probes = $this->probePartitions(
+                $connection,
+                $claim,
+                array_values(array_filter($partitions, static fn (string $partition): bool => $ownership[$partition])),
+            );
             $owned = [];
 
             // Per partition, the lowest pending row that is NOT due yet, or null. Read with the head
@@ -407,7 +418,7 @@ final readonly class OutboxRelay
                     // Transient: bump attempts, schedule the next attempt with back-off, leave pending,
                     // block this partition since its tail must keep order, but other partitions drain on.
                     $connection->executeStatement(
-                        /** @lang PostgreSQL */
+                        /* language=PostgreSQL */
                         <<<'SQL'
                             UPDATE es_outbox
                             SET attempts = :attempts,
@@ -438,7 +449,15 @@ final readonly class OutboxRelay
             // FOR UPDATE and hold it from another worker, and a probe after the batch cannot see past
             // our own locks. It can say "more" over a queue that ended exactly on the cap, which costs
             // one extra run; the other direction costs a deploy over events still flying.
-            return new OutboxDrainResult(count($publishedIds), $failed, $stalled, $stalledCause, array_keys($stalledPartitions), count($rows) === $batch);
+            return new OutboxDrainResult(
+                count($publishedIds),
+                $failed,
+                $stalled,
+                $stalledCause,
+                // back to strings: a partition key like `42` was stored as an integer key above
+                array_map(strval(...), array_keys($stalledPartitions)),
+                count($rows) === $batch,
+            );
         });
 
         // The heartbeat, after the drain committed and before any outage is surfaced: a tick that
@@ -495,7 +514,7 @@ final readonly class OutboxRelay
     public function countPending(): int
     {
         return (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             "SELECT count(*) FROM es_outbox WHERE status = 'pending'",
         );
     }
@@ -521,7 +540,7 @@ final readonly class OutboxRelay
     private function claimDueRows(Connection $connection, int $batch): array
     {
         $rows = $connection->fetchAllAssociative(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 SELECT o.id, o.position, o.partition_key, o.partition_key AS stream, o.type, o.event_version, o.attempts,
                        e.header, e.content, CAST(e.sequence_no IS NULL AS integer) AS vanished
@@ -566,22 +585,23 @@ final readonly class OutboxRelay
             ['partitions' => json_encode($partitions, JSON_THROW_ON_ERROR)],
         );
 
-        return array_map(static fn (mixed $owned): bool => (bool) $owned, $rows);
+        return array_map(boolval(...), $rows);
     }
 
     /**
      * One probe, THREE answers, because owning a partition is neither owning its head nor seeing
-     * its holes, and both would put a later version on the wire first. One statement over the same
-     * `(partition_key, status = 'pending')` rows: enriching its aggregates costs nothing the pass
-     * did not already pay, where a second query would ship its own plan, and a hot-path query
-     * ships its index in the same commit; this one adds neither.
+     * its holes, and both would put a later version on the wire first. Each partition's aggregates
+     * read pending rows at or below its highest claimed id. A later suffix cannot block this window
+     * and is excluded from the scan. An old or sparse pending prefix can still exceed the batch.
+     * The exact claim count bounds the JSON relation's estimate without truncating its input;
+     * two bound parameters serve every batch size.
      *
      * `head`: the claim is rows-first, since the SELECT row-locked a batch BEFORE any partition
      * claim, so a sibling may hold the row lock on an OLDER pending row of this very partition;
      * its SKIP LOCKED hid that row from us. If any pending row is older than the first one WE
      * hold, it belongs to someone else's batch, or to the next tick; order defers to it.
      *
-     * `cooling_floor`: the lowest pending row of this partition that is NOT due. The claim filters
+     * `cooling_floor`: the lowest pending row in the prefix that is NOT due. The claim filters
      * those out, so they are invisible to the loop, and invisible is exactly the danger: a cooling
      * row in the MIDDLE of a partition would let the rows behind it sail past. That state is
      * reachable, not theoretical: dead-letter a row, let a later one cool on a transient failure,
@@ -595,10 +615,10 @@ final readonly class OutboxRelay
      * ours; publishing the window would jump over it.
      *
      * One statement for every partition the tick owns, each answered by its own row; a partition
-     * with no pending row answers nothing and reads as an empty probe.
+     * with no pending row in its prefix answers null extrema and a zero due count.
      *
      * @param  list<string>  $partitions  the owned partitions, in claim order
-     * @return array<string, PartitionProbe> keyed by partition, absent when it holds no pending row
+     * @return array<string, PartitionProbe> one probe per owned partition
      *
      * @throws Exception on a DBAL failure of the probe
      * @throws JsonException when a claim cannot be encoded
@@ -609,24 +629,30 @@ final readonly class OutboxRelay
             return [];
         }
 
-        $claims = [];
-        foreach ($partitions as $partition) {
-            $claims[] = ['partition_key' => $partition, 'max_claimed' => $claim->maxFor($partition)];
-        }
+        $claims = array_map(
+            static fn (string $partition): array => ['partition_key' => $partition, 'max_claimed' => $claim->maxFor($partition)],
+            $partitions,
+        );
 
         $rows = $connection->fetchAllAssociative(
             /* language=PostgreSQL */
             <<<'SQL'
-                SELECT o.partition_key,
-                       min(o.id) AS head,
-                       min(o.id) FILTER (WHERE o.next_attempt_at > clock_timestamp()) AS cooling_floor,
-                       count(*) FILTER (WHERE o.id <= c.max_claimed
-                                          AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= clock_timestamp())) AS due_in_window
-                FROM jsonb_to_recordset(CAST(:claims AS jsonb)) AS c(partition_key text, max_claimed bigint)
-                JOIN es_outbox o ON o.partition_key = c.partition_key AND o.status = 'pending'
-                GROUP BY o.partition_key
+                SELECT c.partition_key, p.head, p.cooling_floor, p.due_in_window
+                FROM (
+                    SELECT *
+                    FROM jsonb_to_recordset(CAST(:claims AS jsonb)) AS claims(partition_key text, max_claimed bigint)
+                    LIMIT :claim_count
+                ) AS c
+                CROSS JOIN LATERAL (
+                    SELECT min(o.id) AS head,
+                           min(o.id) FILTER (WHERE o.next_attempt_at > clock_timestamp()) AS cooling_floor,
+                           count(*) FILTER (WHERE o.next_attempt_at IS NULL OR o.next_attempt_at <= clock_timestamp()) AS due_in_window
+                    FROM es_outbox o
+                    WHERE o.partition_key = c.partition_key AND o.status = 'pending' AND o.id <= c.max_claimed
+                ) AS p
                 SQL,
-            ['claims' => json_encode($claims, JSON_THROW_ON_ERROR)],
+            ['claims' => json_encode($claims, JSON_THROW_ON_ERROR), 'claim_count' => count($claims)],
+            ['claim_count' => ParameterType::INTEGER],
         );
 
         $probes = [];
@@ -659,8 +685,12 @@ final readonly class OutboxRelay
         }
 
         $sql = match ($this->disposal) {
-            OutboxDisposal::Delete => /** @lang PostgreSQL */ 'DELETE FROM es_outbox WHERE id IN (:ids)',
-            OutboxDisposal::Archive => /* language=PostgreSQL */ <<<'SQL'
+            OutboxDisposal::Delete =>
+                /* language=PostgreSQL */
+                'DELETE FROM es_outbox WHERE id IN (:ids)',
+            OutboxDisposal::Archive =>
+                /* language=PostgreSQL */
+                <<<'SQL'
                 WITH moved AS (
                     DELETE FROM es_outbox WHERE id IN (:ids)
                     RETURNING id, position, partition_key, type, event_version, attempts, occurred_at
@@ -707,7 +737,7 @@ final readonly class OutboxRelay
         }
 
         $connection->executeStatement(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 UPDATE es_outbox AS refused
                 SET next_attempt_at = (
@@ -748,7 +778,7 @@ final readonly class OutboxRelay
     private function deadLetter(Connection $connection, array $row, Throwable $error, ?int $attempts = null): void
     {
         $connection->executeStatement(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 UPDATE es_outbox
                 SET status = 'failed', attempts = :attempts, last_error = :error, failed_at = clock_timestamp()
@@ -800,8 +830,8 @@ final readonly class OutboxRelay
      * Seconds to wait before the next attempt: exponential, `base * 2^(attempts - 1)` capped, so the
      * `maxAttempts` budget spans a real wall-clock window rather than burning on every drain tick,
      * then equal-jittered to a random point in the top half of that window, the same shape as
-     * {@see \Storm\Chronicler\Store\RetryEventStore::sleepMicros()} and
-     * {@see \Storm\Story\Middleware\RecoverConcurrencyConflict::backoffFor()}. A broker outage fails
+     * {@see RetryEventStore::pause()} and
+     * {@see \Storm\Story\Middleware\RecoverConcurrencyConflict::retryDelay()}. A broker outage fails
      * every in-flight row at close to the same instant; without jitter every one of them computes the
      * SAME `next_attempt_at` and the relay re-floods the broker the moment it recovers, a herd this
      * relay caused rather than merely met.
@@ -822,7 +852,11 @@ final readonly class OutboxRelay
         // represents, and casting first collapsed the capped exponential to the one-second floor
         $window = max(1, (int) min($this->backoffMaxSeconds, $seconds));
 
-        return random_int(max(1, intdiv($window, 2)), $window);
+        // the port draws inside the range it is asked for, and this range never starts below one
+        /** @var int<1, max> $seconds */
+        $seconds = $this->jitter->between(max(1, intdiv($window, 2)), $window);
+
+        return $seconds;
     }
 
     // fail-open, as every observation around a commit: a logger that throws must not undo the back-off

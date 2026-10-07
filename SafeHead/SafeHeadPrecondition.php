@@ -109,7 +109,7 @@ final readonly class SafeHeadPrecondition
     private function timeoutSeconds(string $name): float
     {
         $milliseconds = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT setting FROM pg_settings WHERE name = :name',
             ['name' => $name],
         );
@@ -131,7 +131,7 @@ final readonly class SafeHeadPrecondition
     private function oldestInFlightSeconds(): float
     {
         return (float) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             "SELECT COALESCE(max(EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))), 0)
              FROM pg_stat_activity
              WHERE datname = current_database()

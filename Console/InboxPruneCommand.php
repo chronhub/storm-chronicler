@@ -6,6 +6,7 @@ namespace Storm\Chronicler\Console;
 
 use Doctrine\DBAL\Exception;
 use Override;
+use Storm\Chronicler\Exception\InvalidInboxRetention;
 use Storm\Chronicler\Inbox\DbalInboxStore;
 use Storm\Clock\Duration;
 use Storm\Support\Console\PositiveIntOption;
@@ -28,7 +29,9 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * Pick --before beyond your broker's max redelivery window PLUS the longest queue lag you accept.
  *
  * --before <7d|48h|90m> is required, so there is no accidental prune-all; --dry-run counts without
- * deleting; --batch caps each statement.
+ * deleting; --batch caps each statement. A retention cutoff before the Unix epoch is rejected
+ * before counting or deleting records. The configured request idempotency window is also a
+ * minimum; deployments must add their queue and redelivery horizons to it.
  *
  * Examples:
  *
@@ -42,6 +45,7 @@ final class InboxPruneCommand extends Command
 {
     public function __construct(
         private readonly DbalInboxStore $inbox,
+        private readonly int $idempotencyLifetimeSeconds = 86400,
     ) {
         parent::__construct();
     }
@@ -72,6 +76,11 @@ final class InboxPruneCommand extends Command
             return Command::INVALID;
         }
         $age = $duration->seconds;
+        if ($age < $this->idempotencyLifetimeSeconds) {
+            $io->error(sprintf('--before must cover the configured idempotency retry window of %d seconds; also allow for queue lag and redelivery.', $this->idempotencyLifetimeSeconds));
+
+            return Command::INVALID;
+        }
 
         $batch = PositiveIntOption::parse($input->getOption('batch'));
         if ($batch === null) {
@@ -84,13 +93,17 @@ final class InboxPruneCommand extends Command
 
         $io->title(sprintf('Inbox prune — dedup records older than %s%s', $before, $dryRun ? ' (DRY RUN)' : ''));
 
-        if ($dryRun) {
-            $io->success(sprintf('Would prune %d dedup record(s). Nothing deleted.', $this->inbox->countPrunable($age)));
+        try {
+            $count = $dryRun ? $this->inbox->countPrunable($age) : $this->inbox->prune($age, $batch);
+        } catch (InvalidInboxRetention $error) {
+            $io->error($error->getMessage());
 
-            return Command::SUCCESS;
+            return Command::INVALID;
         }
 
-        $io->success(sprintf('Pruned %d dedup record(s).', $this->inbox->prune($age, $batch)));
+        $io->success($dryRun
+            ? sprintf('Would prune %d dedup record(s). Nothing deleted.', $count)
+            : sprintf('Pruned %d dedup record(s).', $count));
 
         return Command::SUCCESS;
     }

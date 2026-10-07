@@ -180,6 +180,8 @@ final class EventStorePartitionCommand extends Command
             $categories = array_merge($categories, array_column($this->aggregates, 'category'));
         }
 
-        return array_values(array_unique($categories));
+        return $categories
+            |> array_unique(...)
+            |> array_values(...);
     }
 }

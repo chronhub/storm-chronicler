@@ -13,10 +13,13 @@ namespace Storm\Chronicler\Schema;
  * `stream` PINS its collation to `C`, and that is load-bearing rather than tidy. The snapshot sweep
  * reads one category as the key range `[category-, category.)`, which is only a contiguous slice
  * where `-` sorts before `.`; under a libc locale collation punctuation weighs less than letters, so
- * the upper bound falls BELOW every stream of the category and the sweep silently selects nothing.
- * The database's own collation cannot be relied on for it: two clusters declaring `en_US.utf8`
- * answer the comparison differently depending on whether they link musl or glibc. Pinning the column
- * also keeps the primary-key index usable for that range, which a per-query `COLLATE` would not.
+ * the upper bound falls BELOW every stream of the category. The sweep therefore compares its range
+ * under an explicit `COLLATE "C"`, which keeps the range right whatever the column says, and the pin
+ * is what lets the primary-key index serve that comparison: a column whose pin has drifted costs the
+ * index, not the range. Its join with `snapshots` names no collation and needs the pair to agree,
+ * which `SnapshotSchema` states. The database's own collation cannot be relied on either: two
+ * clusters declaring `en_US.utf8` sort `-` against `.` differently depending on whether they link
+ * musl or glibc.
  *
  * @see EventStoreSchema
  * @see \Storm\AggregateRepository\Snapshot\DbalSnapshotStore::staleStreams() the range that depends on it
@@ -29,7 +32,7 @@ final class StreamHeadsSchema
     public static function up(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS stream_heads (
                     stream        text   COLLATE "C" NOT NULL,
@@ -49,7 +52,7 @@ final class StreamHeadsSchema
     public static function down(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS stream_heads',
         ];
     }

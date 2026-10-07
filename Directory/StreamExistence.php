@@ -6,7 +6,7 @@ namespace Storm\Chronicler\Directory;
 
 use Storm\Chronicler\Erasure\StreamEraser;
 use Storm\Contracts\Chronicler\StorageFailure;
-use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
@@ -40,11 +40,7 @@ interface StreamExistence
     /**
      * Does the category hold at least one stream, bare or qualified?
      *
-     * The category is normalized like StreamName normalizes its category segment, trimmed and
-     * lowercased, before validation.
-     *
-     * @throws InvalidStreamException when `$category` is not a bare, well-formed stream category
      * @throws StorageFailure on a store failure of the existence read
      */
-    public function hasCategory(string $category): bool;
+    public function hasCategory(StreamCategory $category): bool;
 }

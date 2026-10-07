@@ -6,10 +6,10 @@ namespace Storm\Chronicler\Store;
 
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
-use InvalidArgumentException;
 use RuntimeException;
 use Storm\Chronicler\Schema\EventStoreSchema;
-use Storm\Stream\StreamName;
+use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 
 /**
  * Provisions per-category LIST partitions of `event_store`, the ops side of the partitioned event
@@ -46,16 +46,16 @@ final readonly class EventStorePartitioner
     /**
      * Create missing category partitions; existing children are recognized by their LIST bound.
      *
-     * @param  list<string>  $categories
+     * @param  list<string>  $categories  the configured values, each read under the `StreamCategory` rule
      *
-     * @throws InvalidArgumentException when a category is not a valid stream category matching `StreamName::CATEGORY_REGEX`, a config error
+     * @throws InvalidStreamException when a category is not a bare, well-formed stream category, a config error
      * @throws RuntimeException when the generated name is occupied or the identifier budget is too small
      * @throws Exception on a DBAL failure
      */
     public function createPartitions(array $categories): void
     {
-        foreach ($categories as $category) {
-            $category = $this->assertValidCategory($category);
+        foreach ($categories as $configured) {
+            $category = $this->declared($configured);
 
             if ($this->existingPartition($category) !== false) {
                 continue;
@@ -83,31 +83,31 @@ final readonly class EventStorePartitioner
     /**
      * Whether the category's child exists and is attached to `event_store` with the matching LIST bound.
      *
-     * @throws InvalidArgumentException when the category is not a bare identifier
+     * @throws InvalidStreamException when the category is not a bare, well-formed stream category
      * @throws Exception on a DBAL failure
      */
     public function verify(string $category): bool
     {
-        $category = $this->assertValidCategory($category);
-
-        return $this->existingPartition($category) !== false;
+        return $this->existingPartition($this->declared($category)) !== false;
     }
 
     /**
      * Return the existing child name or the bounded name used for creation and manual migration.
      *
-     * @throws InvalidArgumentException when the category is invalid
+     * @throws InvalidStreamException when the category is not a bare, well-formed stream category
      * @throws RuntimeException when the server identifier budget cannot hold the generated name
      * @throws Exception on a DBAL failure
      */
     public function partitionName(string $category): string
     {
-        $category = $this->assertValidCategory($category);
+        $category = $this->declared($category);
         $existing = $this->existingPartition($category);
         if ($existing !== false) {
             return $existing;
         }
 
+        // @infection-ignore-all; equivalent: the arithmetic and the comparison below read the numeric
+        // answer as its integer, and `%d` formats it the same, so the cast answers the analyzer alone
         $limit = (int) $this->connection->fetchOne("SELECT current_setting('max_identifier_length')::int");
         $prefix = 'event_store_p_';
         if (strlen($prefix.$category) <= $limit) {
@@ -145,31 +145,29 @@ final readonly class EventStorePartitioner
      * migrate under an ACCESS EXCLUSIVE lock. Zero once the category has its own partition, or was
      * never written.
      *
-     * @throws InvalidArgumentException when the category is not a bare identifier
+     * @throws InvalidStreamException when the category is not a bare, well-formed stream category
      * @throws Exception on a DBAL failure
      */
     public function defaultVolumeFor(string $category): int
     {
-        $category = $this->assertValidCategory($category);
-
         return (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT count(*) FROM event_store_default WHERE category = :category',
-            ['category' => $category],
+            ['category' => $this->declared($category)],
         );
     }
 
     /**
-     * @throws InvalidArgumentException when the category is not a valid stream category matching `StreamName::CATEGORY_REGEX`
+     * A partition category is written in configuration, so it is held to the canonical form rather
+     * than normalized: a value that `StreamCategory` would fold is refused, since the LIST bound and
+     * the child identifier must read exactly what the store writes.
+     *
+     * @throws InvalidStreamException when the value is not a bare, well-formed, canonical stream category
      */
-    private function assertValidCategory(string $category): string
+    private function declared(string $category): string
     {
-        if (preg_match(StreamName::CATEGORY_REGEX, $category) !== 1) {
-            throw new InvalidArgumentException(sprintf(
-                'Invalid event-store partition category [%s]: expected a valid stream category matching %s.',
-                $category,
-                StreamName::CATEGORY_REGEX,
-            ));
+        if (new StreamCategory($category)->value !== $category) {
+            throw InvalidStreamException::invalidCategory($category);
         }
 
         return $category;

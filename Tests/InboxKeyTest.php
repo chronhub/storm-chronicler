@@ -4,16 +4,44 @@ declare(strict_types=1);
 
 namespace Storm\Chronicler\Tests;
 
+use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use Storm\Chronicler\Inbox\InboxKey;
 
 use function hash;
 use function hex2bin;
+use function str_repeat;
 use function strlen;
 
 final class InboxKeyTest extends TestCase
 {
+    #[Test]
+    #[DataProvider('invalidFloors')]
+    public function a_floor_outside_unsigned_48_bit_milliseconds_is_rejected(int $milliseconds): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        InboxKey::v7Floor($milliseconds);
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function invalidFloors(): iterable
+    {
+        yield 'before epoch' => [-1];
+        yield 'overflow' => [281_474_976_710_656];
+    }
+
+    #[Test]
+    public function the_epoch_and_last_representable_millisecond_have_exact_floors(): void
+    {
+        self::assertSame(str_repeat("\0", 16), InboxKey::v7Floor(0));
+        self::assertSame(hex2bin('ffffffffffff'.'00000000000000000000'), InboxKey::v7Floor(281_474_976_710_655));
+    }
+
     #[Test]
     public function a_uuid_becomes_its_sixteen_bytes(): void
     {
@@ -62,5 +90,13 @@ final class InboxKeyTest extends TestCase
         // hashed: the hex of the one against the whole text of the other
         self::assertNotSame(InboxKey::encode('idem-'.$hex), InboxKey::encode('idem-'.hash('sha256', 'x')));
         self::assertSame(16, strlen(InboxKey::encode('00000000-0000-0000-0000-000000000000')));
+    }
+
+    #[Test]
+    public function a_thirty_six_character_text_that_is_no_uuid_is_hashed_like_any_other(): void
+    {
+        $text = str_repeat('z', 36);
+
+        self::assertSame(hash('sha256', $text, true), InboxKey::encode($text));
     }
 }

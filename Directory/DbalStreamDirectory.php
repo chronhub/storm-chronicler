@@ -8,6 +8,8 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Doctrine\DBAL\ParameterType;
 use Storm\Chronicler\Exception\StorageFailure;
+use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
@@ -27,11 +29,20 @@ final readonly class DbalStreamDirectory implements StreamDirectory
 
     public function browse(?string $category, string $afterStream, int $limit): array
     {
+        /* language=PostgreSQL */
         $sql = 'SELECT stream, last_version FROM stream_heads WHERE stream > :after';
         $params = ['after' => $afterStream, 'limit' => $limit];
         $types = ['limit' => ParameterType::INTEGER];
 
         if ($category !== null) {
+            // the raw filter of the HTTP edge: a value that is no category under the StreamName
+            // rule names a lane that cannot exist, so it browses nothing rather than erroring
+            try {
+                $category = new StreamCategory($category)->value;
+            } catch (InvalidStreamException) {
+                return [];
+            }
+
             $escaped = addcslashes($category, '\\%_');
             $sql .= " AND (stream = :category OR stream LIKE :prefix ESCAPE '\\')";
             $params['category'] = $category;
@@ -42,7 +53,7 @@ final readonly class DbalStreamDirectory implements StreamDirectory
 
         try {
             /** @var list<array{stream: string, last_version: int|string}> $rows */
-            $rows = $this->connection->fetchAllAssociative(/** @lang PostgreSQL */ $sql, $params, $types);
+            $rows = $this->connection->fetchAllAssociative($sql, $params, $types);
         } catch (Exception $e) {
             throw StorageFailure::wrap('the stream-directory browse', $e);
         }

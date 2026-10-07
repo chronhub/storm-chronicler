@@ -109,6 +109,19 @@ final class UpcasterVerifyCommandTest extends TestCase
     }
 
     #[Test]
+    public function the_json_document_is_indented_and_keeps_its_slashes_readable(): void
+    {
+        // a deployment log is read by people too: the document is indented, and a type carrying a
+        // slash is printed as written rather than escaped
+        $tester = $this->tester([['type' => 'ghost/event', 'floor' => 1, 'ceiling' => 1, 'n' => 4]], version: 1);
+
+        $tester->execute(['--json' => true]);
+
+        $this->assertStringStartsWith("{\n    \"conformant\": false,\n", $tester->getDisplay());
+        $this->assertStringContainsString('"type": "ghost/event"', $tester->getDisplay());
+    }
+
+    #[Test]
     public function the_failure_count_is_the_number_of_problems_not_of_types(): void
     {
         // one stored type, three missing steps: the operator is told how much is broken, not how many

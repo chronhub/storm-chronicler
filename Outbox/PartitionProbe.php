@@ -5,16 +5,21 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Outbox;
 
 /**
- * One partition's three answers, read in one statement over its pending rows: the head, the
- * cooling floor, and the due count inside the claimed window. Owning a partition is neither
- * owning its head nor seeing its holes; the drain judges both against this probe.
+ * Ordering evidence from one partition's pending prefix at or below its highest claimed id.
+ *
+ * The drain checks ownership of the head and holes in the claimed window using these answers:
+ * - The lowest pending id
+ * - The lowest cooling id
+ * - The due count
+ *
+ * Rows beyond the prefix cannot block a claimed row and do not contribute to the probe.
  */
 final readonly class PartitionProbe
 {
     public function __construct(
-        /** The lowest pending id, or null when the partition holds no pending row. */
+        /** The lowest pending id in the prefix, or null when the prefix holds no pending row. */
         public ?int $head,
-        /** The lowest pending id that is NOT due yet, or null; nothing may publish at or above it. */
+        /** The lowest pending id in the prefix that is NOT due yet, or null; it blocks publication at or above it. */
         public ?int $coolingFloor,
         /** Due pending rows at or below the highest claimed id; fewer in the claim means a hole. */
         public int $dueInWindow,

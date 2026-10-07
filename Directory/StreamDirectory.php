@@ -14,7 +14,8 @@ use Storm\Contracts\Chronicler\StorageFailure;
  * Windowed only, by design: `stream_heads` holds one row per stream, and one aggregate IS one
  * stream, so a full listing is as large as the store's population. The read is resumable: pass
  * the last stream name seen as `$afterStream` to browse the next slice, and a category narrows
- * it to one lane, the bare category stream plus every `category-` qualified one.
+ * it to one lane, the bare category stream plus every `category-` qualified one. Category case is
+ * folded to lowercase; qualifier bytes and the `$afterStream` cursor remain unchanged.
  *
  * Failures cross this port as the contracted StorageFailure with the driver cause preserved,
  * like every other stream_heads read.
@@ -23,7 +24,9 @@ interface StreamDirectory
 {
     /**
      * Browse stream heads in stream-name order, strictly after `$afterStream`, capped at
-     * `$limit`. A null `$category` browses every stream; a category narrows to its lane.
+     * `$limit`. A null `$category` browses every stream; a category narrows to its lane, read under
+     * the `StreamCategory` rule, trimmed and lowercased. A value that is no category under that rule,
+     * the raw filter of an HTTP edge, names a lane that cannot exist and browses nothing.
      *
      * @param  positive-int  $limit
      * @return list<StreamHead>

@@ -42,9 +42,9 @@ final class CatalogueRenameProofTest extends TestCase
     ): void {
         $result = $this->compare($before, $after, $this->chain($upcasterCount));
 
-        self::assertInstanceOf($expectedFailure, $result['read_failure']);
-        self::assertNull($result['message']);
-        self::assertSame(Command::FAILURE, $result['status'], 'The declaration gate must refuse the same unreadable version transition as the real stored-row reader.');
+        self::assertInstanceOf($expectedFailure, $result['read_failure'], $result['record']);
+        self::assertNull($result['message'], $result['record']);
+        self::assertSame(Command::FAILURE, $result['status'], 'The declaration gate must refuse the same unreadable version transition as the real stored-row reader. '.$result['record']);
     }
 
     /**
@@ -61,30 +61,30 @@ final class CatalogueRenameProofTest extends TestCase
     {
         $result = $this->compare('BeforeV1', 'StableV2', new UpcasterChain);
 
-        self::assertInstanceOf(MissingUpcaster::class, $result['read_failure']);
-        self::assertSame(Command::FAILURE, $result['status']);
+        self::assertInstanceOf(MissingUpcaster::class, $result['read_failure'], $result['record']);
+        self::assertSame(Command::FAILURE, $result['status'], $result['record']);
     }
 
     public function test_a_rename_at_the_same_version_remains_readable(): void
     {
         $result = $this->compare('BeforeV1', 'AfterV1', new UpcasterChain);
 
-        self::assertNull($result['read_failure']);
-        self::assertSame(Command::SUCCESS, $result['status']);
-        self::assertNotNull($result['message']);
-        self::assertInstanceOf(Storm\Contracts\Message\DomainEvent::class, $result['message']->message());
-        self::assertSame(['id' => 'catalogue-proof', 'name' => 'original'], $result['message']->message()->toPayload());
+        self::assertNull($result['read_failure'], $result['record']);
+        self::assertSame(Command::SUCCESS, $result['status'], $result['record']);
+        self::assertNotNull($result['message'], $result['record']);
+        self::assertInstanceOf(Storm\Contracts\Message\DomainEvent::class, $result['message']->message(), $result['record']);
+        self::assertSame(['id' => 'catalogue-proof', 'name' => 'original'], $result['message']->message()->toPayload(), $result['record']);
     }
 
     public function test_a_rename_with_its_canonical_upcaster_remains_readable(): void
     {
         $result = $this->compare('BeforeV1', 'AfterV2', $this->chain(1));
 
-        self::assertNull($result['read_failure']);
-        self::assertSame(Command::SUCCESS, $result['status']);
-        self::assertNotNull($result['message']);
-        self::assertInstanceOf(Storm\Contracts\Message\DomainEvent::class, $result['message']->message());
-        self::assertSame(['id' => 'catalogue-proof', 'name' => 'original', 'upcasted' => true], $result['message']->message()->toPayload());
+        self::assertNull($result['read_failure'], $result['record']);
+        self::assertSame(Command::SUCCESS, $result['status'], $result['record']);
+        self::assertNotNull($result['message'], $result['record']);
+        self::assertInstanceOf(Storm\Contracts\Message\DomainEvent::class, $result['message']->message(), $result['record']);
+        self::assertSame(['id' => 'catalogue-proof', 'name' => 'original', 'upcasted' => true], $result['message']->message()->toPayload(), $result['record']);
     }
 
     private function chain(int $count): UpcasterChain
@@ -98,7 +98,7 @@ final class CatalogueRenameProofTest extends TestCase
     }
 
     /**
-     * @return array{status: int, read_failure: Throwable|null, message: Message|null}
+     * @return array{status: int, read_failure: Throwable|null, message: Message|null, record: string}
      */
     private function compare(string $before, string $after, UpcasterChain $chain): array
     {
@@ -135,19 +135,21 @@ final class CatalogueRenameProofTest extends TestCase
             self::assertSame(strlen($currentJson), file_put_contents($currentPath, $currentJson));
             $console = new CommandTester(new MessageCheckCommand(new CatalogueCompatibility($chain)));
             $status = $console->execute(['baseline' => $baselinePath, 'current' => $currentPath], ['interactive' => false]);
-            fwrite(STDERR, json_encode([
+            // the proof record rides the assertion messages, never STDERR, where it would kill the
+            // initial pass of every mutation gate that runs this suite
+            $record = json_encode([
                 'before' => $before,
                 'after' => $after,
                 'gate_status' => $status,
                 'reader_exception' => $readFailure === null ? null : $readFailure::class,
                 'command_output' => $console->getDisplay(),
-            ], JSON_THROW_ON_ERROR).PHP_EOL);
+            ], JSON_THROW_ON_ERROR);
         } finally {
             unlink($baselinePath);
             unlink($currentPath);
         }
 
-        return ['status' => $status, 'read_failure' => $readFailure, 'message' => $message];
+        return ['status' => $status, 'read_failure' => $readFailure, 'message' => $message, 'record' => $record];
     }
 }
 

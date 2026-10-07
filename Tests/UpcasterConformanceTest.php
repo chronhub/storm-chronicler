@@ -9,6 +9,7 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Storm\Chronicler\Evolution\AnomalyKind;
 use Storm\Chronicler\Evolution\IdentityEventTypeMapper;
 use Storm\Chronicler\Evolution\Upcaster;
 use Storm\Chronicler\Evolution\UpcasterChain;
@@ -45,6 +46,19 @@ final class UpcasterConformanceTest extends TestCase
         $this->assertSame([], $conformance->verdicts([
             ['type' => SomethingHappened::class, 'floor' => 5, 'ceiling' => 5, 'n' => 100],
         ]));
+    }
+
+    #[Test]
+    public function the_typed_verdict_is_read_straight_from_the_grouped_rows(): void
+    {
+        // the pure half is public: a caller already holding the grouped rows reads the typed
+        // anomalies without a connection
+        $anomalies = new UpcasterConformance($this->mapperAt(3), new UpcasterChain)
+            ->anomaliesOf([['type' => 'ghost.event', 'floor' => 1, 'ceiling' => 1, 'n' => 4]]);
+
+        $this->assertCount(1, $anomalies);
+        $this->assertSame(AnomalyKind::UnknownType, $anomalies[0]->kind);
+        $this->assertSame('ghost.event', $anomalies[0]->type);
     }
 
     #[Test]

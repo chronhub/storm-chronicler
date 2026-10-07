@@ -15,6 +15,7 @@ use Storm\Chronicler\Evolution\UpcasterChain;
 use Storm\Chronicler\Outbox\OutboxPublisher;
 use Storm\Chronicler\Outbox\OutboxRelay;
 use Storm\Chronicler\Record\StoredEventReader;
+use Storm\Chronicler\Tests\Fixture\RecordingJitter;
 use Storm\Serializer\DefaultMessageSerializer;
 
 final class OutboxBackoffCurveTest extends TestCase
@@ -40,6 +41,28 @@ final class OutboxBackoffCurveTest extends TestCase
         $delay = new ReflectionMethod($relay, 'backoffSeconds')->invoke($relay, $attempts);
         self::assertGreaterThanOrEqual(max(1, intdiv($window, 2)), $delay, "attempt {$attempts}: at least half the window");
         self::assertLessThanOrEqual($window, $delay, "attempt {$attempts}: capped by the window");
+    }
+
+    #[Test]
+    #[DataProvider('curve')]
+    public function each_attempt_asks_the_jitter_for_the_upper_half_of_its_window(int $attempts, int $window): void
+    {
+        // equal jitter: the draw spans the upper half of the capped window, the lower end floored at
+        // one second, and whichever end the jitter answers is the delay
+        foreach ([[RecordingJitter::lowest(), max(1, intdiv($window, 2))], [RecordingJitter::highest(), $window]] as [$jitter, $delay]) {
+            $relay = new OutboxRelay(
+                $this->createStub(Connection::class),
+                new StoredEventReader(new DefaultMessageSerializer, new IdentityEventTypeMapper, new UpcasterChain),
+                $this->createStub(OutboxPublisher::class),
+                maxAttempts: 5,
+                backoffBaseSeconds: 1,
+                backoffMaxSeconds: 60,
+                jitter: $jitter,
+            );
+
+            self::assertSame($delay, new ReflectionMethod($relay, 'backoffSeconds')->invoke($relay, $attempts), "attempt {$attempts}");
+            self::assertSame([[max(1, intdiv($window, 2)), $window]], $jitter->asked, "attempt {$attempts}");
+        }
     }
 
     #[Test]

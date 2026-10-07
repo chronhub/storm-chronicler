@@ -7,7 +7,7 @@ namespace Storm\Chronicler\Directory;
 use Storm\Chronicler\Erasure\CacheEvictingStreamEraser;
 use Storm\Clock\PointInTime;
 use Storm\Contracts\Clock\Clock;
-use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
@@ -77,9 +77,9 @@ final class CategoryCachedStreamExistence implements StreamExistence
         return $exists;
     }
 
-    public function hasCategory(string $category): bool
+    public function hasCategory(StreamCategory $category): bool
     {
-        $category = $this->bareCategory($category);
+        $category = $category->value;
 
         if (isset($this->alive[$category])) {
             return true;
@@ -91,7 +91,7 @@ final class CategoryCachedStreamExistence implements StreamExistence
             return false; // remembered negative, still within its TTL
         }
 
-        $lives = $this->inner->hasCategory($category);
+        $lives = $this->inner->hasCategory(new StreamCategory($category));
 
         if ($lives) {
             $this->remember($category);
@@ -108,34 +108,15 @@ final class CategoryCachedStreamExistence implements StreamExistence
 
     /**
      * Evict a category from both sides of the cache; the next probe re-confirms against the store.
-     *
-     * @throws InvalidStreamException when `$category` is not a bare, well-formed stream category
      */
-    public function forgetCategory(string $category): void
+    public function forgetCategory(StreamCategory $category): void
     {
-        $category = $this->bareCategory($category);
-
-        unset($this->alive[$category], $this->absentUntil[$category]);
-    }
-
-    /**
-     * Normalize and validate through the StreamName VO so the cache key equals what the store sees.
-     *
-     * @throws InvalidStreamException when the value is malformed or names a qualified stream
-     */
-    private function bareCategory(string $category): string
-    {
-        $name = new StreamName($category);
-
-        if ($name->qualifier !== null) {
-            throw InvalidStreamException::invalidCategory($category);
-        }
-
-        return $name->category;
+        unset($this->alive[$category->value], $this->absentUntil[$category->value]);
     }
 
     private function remember(string $category): void
     {
+        // @infection-ignore-all; equivalent: a set, read by `isset()` alone, so the value is arbitrary
         $this->alive[$category] = true;
 
         unset($this->absentUntil[$category]);

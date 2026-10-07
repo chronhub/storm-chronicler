@@ -14,7 +14,7 @@ use Storm\Stream\StreamName;
 /**
  * Unit pin of the windowed feed read; the actual paging over a store is covered by the
  * QueryProjectionRunner integration test. Here: the window is stamped and honored, the scope derives
- * its clauses from one StreamName, category always and stream only when qualified, the type clause is
+ * its clauses from one StreamName, category always and stream when qualified or explicitly exact, the type clause is
  * conditional and bound, and the order is the catch-up order.
  */
 final class EventFeedFilterTest extends TestCase
@@ -63,6 +63,18 @@ final class EventFeedFilterTest extends TestCase
         $this->assertStringContainsString('e.category = :feedCategory', $sql);
         $this->assertStringNotContainsString('e.stream', $sql);
         $this->assertSame('account', $qb->getParameter('feedCategory'));
+    }
+
+    #[Test]
+    public function exact_selection_can_narrow_a_bare_name_without_widening_to_its_category(): void
+    {
+        $qb = $this->queryBuilder();
+        new EventFeedFilter(scope: new StreamName('account'), exactStream: true)->apply($qb);
+
+        $this->assertStringContainsString('e.category = :feedCategory', $qb->getSQL());
+        $this->assertStringContainsString('e.stream = :feedStream', $qb->getSQL());
+        $this->assertSame('account', $qb->getParameter('feedCategory'));
+        $this->assertSame('account', $qb->getParameter('feedStream'));
     }
 
     #[Test]

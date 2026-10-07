@@ -33,7 +33,7 @@ final class OutboxArchiveSchema
     public static function up(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS es_outbox_archive (
                     id            bigint   NOT NULL,
@@ -53,7 +53,7 @@ final class OutboxArchiveSchema
                     CONSTRAINT es_outbox_archive_attempts_chk CHECK (attempts >= 0)
                 )
                 SQL,
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_outbox_archive_age_idx ON es_outbox_archive USING brin (archived_at)
                 SQL,
@@ -66,7 +66,7 @@ final class OutboxArchiveSchema
     public static function down(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS es_outbox_archive',
         ];
     }

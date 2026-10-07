@@ -47,7 +47,7 @@ final readonly class PersonalDataVeil
      */
     public function isDeclaredKey(string $key): bool
     {
-        return array_any($this->map, fn ($declared) => in_array($key, $declared['keys'], true));
+        return array_any($this->map, static fn ($declared) => in_array($key, $declared['keys'], true));
     }
 
     /**

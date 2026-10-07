@@ -52,4 +52,46 @@ final class InboxConsumersTest extends TestCase
         self::assertSame(7, $registry->id('events'));
         self::assertSame(3, $reads, 'outside a transaction the first lookup is the last read');
     }
+
+    #[Test]
+    public function the_registry_is_read_then_written_under_the_consumer_s_name(): void
+    {
+        $calls = [];
+        $connection = $this->createStub(Connection::class);
+        $connection->method('fetchOne')->willReturnCallback(static function (string $sql, array $params) use (&$calls): int|false {
+            $calls[] = $params;
+
+            return count($calls) === 1 ? false : 9;
+        });
+        $connection->method('getTransactionNestingLevel')->willReturn(1);
+
+        self::assertSame(9, new InboxConsumers($connection)->id('events'));
+        self::assertSame([['name' => 'events'], ['name' => 'events']], $calls);
+    }
+
+    #[Test]
+    public function an_id_below_one_is_refused_like_no_id_at_all(): void
+    {
+        $connection = $this->createStub(Connection::class);
+        $connection->method('fetchOne')->willReturn('0');
+        $connection->method('getTransactionNestingLevel')->willReturn(0);
+
+        $this->expectException(LogicException::class);
+
+        new InboxConsumers($connection)->id('events');
+    }
+
+    #[Test]
+    public function an_id_the_driver_hands_back_as_text_is_cached_as_the_integer_it_is(): void
+    {
+        // a driver is free to answer a column as text; the cache keeps the integer, or the next
+        // lookup would hand an int-typed caller the text
+        $connection = $this->createStub(Connection::class);
+        $connection->method('fetchOne')->willReturn('7');
+        $connection->method('getTransactionNestingLevel')->willReturn(0);
+        $registry = new InboxConsumers($connection);
+
+        self::assertSame(7, $registry->id('events'));
+        self::assertSame(7, $registry->id('events'));
+    }
 }

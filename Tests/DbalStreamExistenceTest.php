@@ -12,6 +12,7 @@ use RuntimeException;
 use Storm\Chronicler\Directory\DbalStreamExistence;
 use Storm\Chronicler\Exception\StorageFailure;
 use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
@@ -68,7 +69,7 @@ final class DbalStreamExistenceTest extends TestCase
             ->with($this->anything(), ['category' => 'order']) // trimmed + lowercased, pinned
             ->willReturn(1);
 
-        $this->assertTrue(new DbalStreamExistence($connection)->hasCategory(' ORDER '));
+        $this->assertTrue(new DbalStreamExistence($connection)->hasCategory(new StreamCategory(' ORDER ')));
     }
 
     #[Test]
@@ -77,7 +78,7 @@ final class DbalStreamExistenceTest extends TestCase
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->once())->method('fetchOne')->willReturn(false);
 
-        $this->assertFalse(new DbalStreamExistence($connection)->hasCategory('order'));
+        $this->assertFalse(new DbalStreamExistence($connection)->hasCategory(new StreamCategory('order')));
     }
 
     #[Test]
@@ -88,7 +89,7 @@ final class DbalStreamExistenceTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        new DbalStreamExistence($connection)->hasCategory('order-42'); // a full stream name is NOT a category
+        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('order-42')); // a full stream name is NOT a category
     }
 
     #[Test]
@@ -99,7 +100,7 @@ final class DbalStreamExistenceTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        new DbalStreamExistence($connection)->hasCategory('9order'); // must start with a letter
+        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('9order')); // must start with a letter
     }
 
     #[Test]
@@ -110,7 +111,7 @@ final class DbalStreamExistenceTest extends TestCase
         $connection->expects($this->once())->method('fetchOne')->willThrowException($driverFailure);
 
         try {
-            new DbalStreamExistence($connection)->hasCategory('order');
+            new DbalStreamExistence($connection)->hasCategory(new StreamCategory('order'));
             $this->fail('a driver failure of the probe must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause

@@ -60,8 +60,8 @@ final readonly class DbalOutboxWriter implements OutboxWriter
                 $params[] = $entry->eventVersion;
             }
 
-            // The row names the event and carries no copy of its payload: `header` and `content` keep
-            // their empty default, the relay reads both from the store in its claim (WP-B′, #585).
+            // The row names the event and carries no payload copy. The relay reads `header` and
+            // `content` from `event_store` when claiming the publication work.
             $placeholders = $chunk
                     |> count(...)
                     |> (static fn ($x) => array_fill(0, $x, '(?, ?, ?, ?)'))
@@ -84,7 +84,7 @@ final readonly class DbalOutboxWriter implements OutboxWriter
     public function countArchivedOlderThan(int $ageSeconds): int
     {
         return (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT count(*) FROM es_outbox_archive WHERE '.self::ARCHIVE_PRUNABLE,
             ['age' => $ageSeconds],
         );

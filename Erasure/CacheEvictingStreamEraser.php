@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Erasure;
 
 use Storm\Chronicler\Directory\CategoryCachedStreamExistence;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
@@ -25,7 +26,7 @@ final readonly class CacheEvictingStreamEraser implements StreamEraser
         $removed = $this->inner->erase($streamName);
 
         if ($removed > 0) {
-            $this->cache->forgetCategory($streamName->category);
+            $this->cache->forgetCategory(new StreamCategory($streamName->category));
         }
 
         return $removed;

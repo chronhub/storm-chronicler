@@ -63,6 +63,9 @@ final class InboxConsumers
             );
         }
 
+        // `$id` is numeric past the first test, and a numeric string compares with 1 as its number, so
+        // dropping the `(int)` here is an equivalent mutant, left unignored on purpose: the comparison
+        // and the disjunction on this line are killed, and an ignore would mask them
         if (! is_numeric($id) || (int) $id < 1) {
             throw new LogicException(sprintf('The inbox registry answered no id for consumer "%s".', $consumer));
         }

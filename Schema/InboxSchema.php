@@ -30,7 +30,7 @@ final class InboxSchema
         return [
             // The consumer names behind `es_inbox.consumer_id`: registered once, on the first
             // proof recorded under a name, so a proof carries two bytes of consumer.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS es_inbox_consumers (
                     id   smallint GENERATED ALWAYS AS IDENTITY,
@@ -43,7 +43,7 @@ final class InboxSchema
             // text, never its characters: the key is what a proof costs, in the tuple and again in
             // the primary index. The registry is not a foreign key: a proof is written on every
             // consumed message, and the registry's row for a live consumer never goes away.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS es_inbox (
                     consumer_id       smallint NOT NULL,
@@ -62,7 +62,7 @@ final class InboxSchema
             // probe, never migrated. The guard reads the constraint on THIS relation: pg_constraint
             // spans the database, and a sibling schema carrying the same name would otherwise hide
             // the missing CHECK here.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 DO $$
                 BEGIN
@@ -87,7 +87,7 @@ final class InboxSchema
             // above is what keeps the version read total: `get_byte` on a shorter key would fail the
             // whole prune rather than skip a row. BRIN, not btree: a few pages of range summaries at
             // near-zero write cost on a table that takes one INSERT per consumed message.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_inbox_age_idx ON es_inbox USING brin (processed_at)
                 SQL,
@@ -97,7 +97,7 @@ final class InboxSchema
             // absorbing UPDATE pays: it changes an indexed column, so it is no longer a HOT update
             // and writes an entry in every index of the table, the primary key included; the
             // redeliveries are the rare path, the scrape the frequent one.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_inbox_duplicates_idx ON es_inbox (duplicates) WHERE duplicates > 0
                 SQL,
@@ -110,9 +110,9 @@ final class InboxSchema
     public static function down(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS es_inbox',
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS es_inbox_consumers',
         ];
     }

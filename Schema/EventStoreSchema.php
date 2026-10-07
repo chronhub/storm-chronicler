@@ -92,7 +92,7 @@ final class EventStoreSchema
     public static function up(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS event_store (
                     category      text     NOT NULL,
@@ -115,14 +115,14 @@ final class EventStoreSchema
                     CONSTRAINT event_store_event_version_chk CHECK (event_version > 0)
                 ) PARTITION BY LIST (category)
                 SQL,
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS event_store_default PARTITION OF event_store DEFAULT
                 SQL,
             // Serves the safe-head gap scan, SafeHeadAdvancer's `sequence_no > floor ORDER BY sequence_no`
             // and `max(sequence_no)`, AND the projector's per-cycle filtered read, ProjectionFilter's
             // `sequence_no` range across partitions.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS event_store_sequence_no_idx ON event_store (sequence_no)
                 SQL,
@@ -136,7 +136,7 @@ final class EventStoreSchema
             // that way scans the whole store and no result ever looks wrong. A comparison against a
             // column pinned `COLLATE "C"` misses it the same way, resolving to a collation this index
             // is not built under; collate to the side whose index must serve.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS event_store_correlation_idx ON event_store ((header #>> '{__correlation_id}'))
                 SQL,
@@ -152,7 +152,7 @@ final class EventStoreSchema
             // No CASCADE: partitions ride with their parent, and nothing else Storm owns depends
             // on the store; a dependent OUTSIDE the manifest, such as an application view, makes the drop
             // refuse loud, naming it, instead of being silently destroyed.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS event_store',
         ];
     }

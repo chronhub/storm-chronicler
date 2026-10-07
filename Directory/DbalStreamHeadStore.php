@@ -11,9 +11,10 @@ use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
  * Postgres StreamHeadStore on Doctrine DBAL. The head CAS `advance()` is split by intent: a pure
- * UPDATE for an existing stream, a create-only `INSERT … ON CONFLICT DO NOTHING` for a new one. That
- * makes the new-stream guard, creation only at `expectedVersion = 0`, structural: no statement can
- * both create and CAS. `bump()` and `lockForErase()` stay PG UPSERTs via `ON CONFLICT DO UPDATE`.
+ * UPDATE when `expectedVersion > 0`, and an INSERT with a conditional conflict update when
+ * `expectedVersion = 0`. The conflict arm advances only a head still at version 0, an empty stream;
+ * it refuses every nonzero head. A positive-version CAS cannot recreate a deleted stream.
+ * `bump()` and `lockForErase()` use their own `ON CONFLICT DO UPDATE` rules.
  *
  * It opens no transaction of its own, so its writes add no nesting inside the event store's
  * `transactional()` and projectors reuse it for reads outside any transaction.
@@ -43,10 +44,11 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
      *
      * So `expectedVersion > 0` runs a pure UPDATE: under READ COMMITTED, the row a committed eraser
      * deleted matches nothing, the CAS returns false, and the appender gets the loud OCC conflict
-     * it deserves. `expectedVersion = 0` runs `INSERT … ON CONFLICT DO NOTHING`: a creator that
-     * waited behind an erase inserts fresh once it commits, exactly the fresh-stream case the
-     * eraser promises, while an existing head makes the insert a no-op, false, so the guard holds
-     * on that path too. `bump()` keeps its unconditional UPSERT: a fact append restarting a stream
+     * it deserves. `expectedVersion = 0` inserts a new head or updates an existing head only while
+     * its version is 0. A creator waiting behind an erase inserts fresh after it commits; a
+     * nonzero head makes the conflict arm a no-op, returning false. An empty head can therefore
+     * receive its first append without weakening the version guard. `bump()` keeps its
+     * unconditional UPSERT: a fact append restarting a stream
      * from scratch after an erase is its documented behavior, not a corruption.
      */
     public function advance(string $stream, int $expectedVersion, int $newVersion): bool
@@ -54,7 +56,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
         try {
             if ($expectedVersion > 0) {
                 return $this->connection->executeStatement(
-                    /** @lang PostgreSQL */
+                    /* language=PostgreSQL */
                     'UPDATE stream_heads SET last_version = :newVersion
                      WHERE stream = :stream AND last_version = :expectedVersion',
                     ['stream' => $stream, 'newVersion' => $newVersion, 'expectedVersion' => $expectedVersion],
@@ -62,7 +64,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
             }
 
             return $this->connection->executeStatement(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'INSERT INTO stream_heads (stream, last_version) VALUES (:stream, :newVersion)
                  ON CONFLICT (stream) DO UPDATE
                     SET last_version = EXCLUDED.last_version
@@ -79,7 +81,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
         try {
             /** @var positive-int */
             return (int) $this->connection->fetchOne(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'INSERT INTO stream_heads (stream, last_version) VALUES (:stream, :count)
                  ON CONFLICT (stream) DO UPDATE
                     SET last_version = stream_heads.last_version + :count
@@ -95,7 +97,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
     {
         try {
             $version = $this->connection->fetchOne(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'SELECT last_version FROM stream_heads WHERE stream = :stream',
                 ['stream' => $stream],
             );
@@ -120,7 +122,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
     {
         try {
             $this->connection->executeStatement(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'INSERT INTO stream_heads (stream, last_version) VALUES (:stream, 0)
                  ON CONFLICT (stream) DO UPDATE SET last_version = stream_heads.last_version',
                 ['stream' => $stream],
@@ -134,7 +136,7 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
     {
         try {
             return $this->connection->executeStatement(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'DELETE FROM stream_heads WHERE stream = :stream',
                 ['stream' => $stream],
             ) > 0;

@@ -104,6 +104,8 @@ final class MappedEventTypeMapper implements EventTypeMapper
         static $cache = [];
 
         if (array_key_exists($class, $cache)) {
+            // @infection-ignore-all; equivalent: the recomputation below is a pure function of the class,
+            // so falling through rebuilds an equal value; the cache buys time alone
             return $cache[$class];
         }
 

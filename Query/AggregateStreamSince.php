@@ -6,6 +6,7 @@ namespace Storm\Chronicler\Query;
 
 use Doctrine\DBAL\ParameterType;
 use Doctrine\DBAL\Query\QueryBuilder;
+use Storm\Stream\StreamCategory;
 
 /**
  * One aggregate stream's events after a version, the snapshot read path.
@@ -19,7 +20,7 @@ use Doctrine\DBAL\Query\QueryBuilder;
 final readonly class AggregateStreamSince implements QueryFilter
 {
     public function __construct(
-        public string $category,
+        public StreamCategory $category,
         public string $stream,
         public int $afterVersion,
     ) {}
@@ -30,7 +31,7 @@ final readonly class AggregateStreamSince implements QueryFilter
             ->andWhere('e.stream = :stream')
             ->andWhere('e.version > :afterVersion')
             ->orderBy('e.version', 'ASC')
-            ->setParameter('category', $this->category)
+            ->setParameter('category', $this->category->value)
             ->setParameter('stream', $this->stream)
             ->setParameter('afterVersion', $this->afterVersion, ParameterType::INTEGER);
     }

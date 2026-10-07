@@ -16,9 +16,9 @@ use Throwable;
  * carry no destructive op. You reach for it on purpose.
  *
  * Scope is Chronicler-owned only, removed atomically: the stream's events, its stream-head, and its
- * UNDELIVERED outbox rows, the `pending` and `failed` ones. An es_outbox row is self-carrying, so a
- * survivor would later publish an event of a stream that no longer exists; published rows are
- * history and keep their own disposal. It does NOT touch the projector-owned state, the projection
+ * UNDELIVERED outbox rows, the `pending` and `failed` ones. These publication-index rows name
+ * events whose payload the relay reads from `event_store`; removing them prevents orphaned work
+ * referring to erased events. Archived delivery rows keep their own disposal. It does NOT touch the projector-owned state, the projection
  * rows and the derived-stream link bookkeeping, nor snapshots; read models don't "un-project" when
  * their source is erased, so reset those via the projector.
  *

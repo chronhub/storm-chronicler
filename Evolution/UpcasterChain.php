@@ -63,13 +63,10 @@ final readonly class UpcasterChain
         $duplicated = [];
 
         for ($version = $fromVersion; $version < $toVersion; $version++) {
-            $claimants = 0;
-
-            foreach ($this->upcasters as $upcaster) {
-                if ($this->claims($upcaster, $alias, $version)) {
-                    $claimants++;
-                }
-            }
+            $claimants = count(array_filter(
+                $this->upcasters,
+                fn (Upcaster $upcaster): bool => $this->claims($upcaster, $alias, $version),
+            ));
 
             if ($claimants === 0) {
                 $missing[] = $version;
@@ -131,13 +128,10 @@ final readonly class UpcasterChain
      */
     private function step(string $alias, int $fromVersion, array $payload): array
     {
-        $claimants = [];
-
-        foreach ($this->upcasters as $upcaster) {
-            if ($this->claims($upcaster, $alias, $fromVersion)) {
-                $claimants[] = $upcaster;
-            }
-        }
+        $claimants = array_filter(
+            $this->upcasters,
+            fn (Upcaster $upcaster): bool => $this->claims($upcaster, $alias, $fromVersion),
+        ) |> array_values(...);
 
         if ($claimants === []) {
             throw MissingUpcaster::forStep($alias, $fromVersion);

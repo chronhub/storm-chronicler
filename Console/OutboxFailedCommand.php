@@ -10,6 +10,7 @@ use Override;
 use Storm\Chronicler\Outbox\FailedOutboxMessage;
 use Storm\Chronicler\Outbox\OutboxDeadLetter;
 use Storm\Support\Console\PositiveIntOption;
+use Storm\Support\Text\Str;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -22,9 +23,10 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  * Inspect / recover the outbox dead-letter, `status = 'failed'`; the operator counterpart to
  * RelayOutboxCommand, like `messenger:failed:show|retry`.
  *
- * - Show, the default: list the dead-lettered rows with id, position, type, attempts, and error.
+ * - Show, the default: list one page of dead-lettered rows with id, position, type, attempts, and error.
+ *   `--limit` bounds the page and `--after` resumes after an id. The same options bound collective retry.
  *
- * - `--retry`: requeue them to `pending`, clearing `attempts`, `next_attempt_at`, `last_error`, and
+ * - `--retry --limit=N`: requeue one page to `pending`, clearing `attempts`, `next_attempt_at`, `last_error`, and
  *   `failed_at`, so the relay republishes them. The relay drains `ORDER BY id`, so re-queued rows go
  *   out in their original order, but events published after the row was dead-lettered already went
  *   out, so a replayed event is re-emitted late, recovery not time travel. Fix the root cause first.
@@ -34,15 +36,15 @@ use Symfony\Component\Console\Style\SymfonyStyle;
  *   `--force` answers for a non-interactive session. An id-scoped purge names its target, so it asks
  *   nothing.
  *
- * An optional `id` argument scopes `--retry` / `--purge` to a single row; omit it to act on all failed
- * rows.
+ * An optional `id` argument scopes `--retry` / `--purge` to a single row; omit it to inspect or retry a page, or purge all failed
+ * rows. Collective retry requires an explicit limit and accepts an exact `--type` filter.
  *
  * Examples:
  *
  * ```bash
  * bin/console storm:outbox:failed
- * bin/console storm:outbox:failed --retry
- * bin/console storm:outbox:failed 42 --purge
+ * bin/console storm:outbox:failed --limit=50 --after=42 --json
+ * bin/console storm:outbox:failed --retry --limit=50
  * bin/console storm:outbox:failed --purge --force
  * ```
  *
@@ -63,7 +65,10 @@ final class OutboxFailedCommand extends Command
     #[Override]
     protected function configure(): void
     {
-        $this->addArgument('id', InputArgument::OPTIONAL, 'A single failed row id (omit to act on all)');
+        $this->addArgument('id', InputArgument::OPTIONAL, 'A single failed row id; omit to inspect or retry a page, or purge all failed rows');
+        $this->addOption('limit', null, InputOption::VALUE_REQUIRED, 'Page size from 1 to 1000; defaults to 100 for inspection, required for collective retry');
+        $this->addOption('after', null, InputOption::VALUE_REQUIRED, 'Inspect or retry rows after this positive id');
+        $this->addOption('type', null, InputOption::VALUE_REQUIRED, 'Exact event type alias for a collective retry');
         $this->addOption('json', null, InputOption::VALUE_NONE, 'Print the machine-readable dead-letter rows, the error untruncated');
         $this->addOption('retry', null, InputOption::VALUE_NONE, 'Requeue the failed row(s) to pending');
         $this->addOption('purge', null, InputOption::VALUE_NONE, 'Delete the failed row(s)');
@@ -113,42 +118,62 @@ final class OutboxFailedCommand extends Command
             }
         }
 
+        $rawLimit = $input->getOption('limit');
+        $rawAfter = $input->getOption('after');
+        $type = $input->getOption('type');
+        if (($rawLimit !== null || $rawAfter !== null) && ($id !== null || $purge)) {
+            $io->getErrorStyle()->error('Use --limit and --after only for inspection or collective --retry, without an id or --purge.');
+
+            return Command::INVALID;
+        }
+
+        if ($type !== null && (! $retry || $id !== null || ! is_string($type) || trim($type) === '')) {
+            $io->getErrorStyle()->error('Use a non-empty --type only with collective --retry.');
+
+            return Command::INVALID;
+        }
+
+        if ($retry && $id === null && $rawLimit === null) {
+            $io->getErrorStyle()->error('Collective --retry requires an explicit --limit from 1 to 1000. Repeat with the returned --after cursor to continue.');
+
+            return Command::INVALID;
+        }
+
+        $limit = $rawLimit === null ? 100 : PositiveIntOption::parse($rawLimit);
+        $after = $rawAfter === null ? 0 : PositiveIntOption::parse($rawAfter);
+        if ($limit === null || $limit > 1000 || $after === null) {
+            $io->getErrorStyle()->error('The limit must be an integer from 1 to 1000; after must be a representable positive integer.');
+
+            return Command::INVALID;
+        }
+
         if ($retry) {
-            return $this->requeue($io, $output, $id, $json);
+            return $id === null
+                ? $this->requeuePage($io, $output, $json, $limit, $after, $type)
+                : $this->requeue($io, $output, $id, $json);
         }
 
         if ($purge) {
             return $this->purge($io, $input, $output, $id, $json);
         }
 
-        return $this->show($io, $output, $id, $json);
+        return $this->show($io, $output, $id, $json, $limit, $after);
     }
 
     /**
+     * @param  positive-int  $limit
+     * @param  non-negative-int  $after
+     *
      * @throws JsonException when the machine document cannot be encoded
      * @throws Exception on a DBAL failure of the dead-letter read
      */
-    private function show(SymfonyStyle $io, OutputInterface $output, ?int $id, bool $json): int
+    private function show(SymfonyStyle $io, OutputInterface $output, ?int $id, bool $json, int $limit, int $after): int
     {
-        $rows = $this->deadLetter->listFailed($id);
-
-        if ($rows === []) {
-            if ($json) {
-                $output->writeln(json_encode(['messages' => []], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT));
-
-                return Command::SUCCESS;
-            }
-
-            $io->success('No dead-lettered outbox messages.');
-
-            return Command::SUCCESS;
-        }
+        $rows = $id === null ? $this->deadLetter->listFailedPage($after, $limit) : $this->deadLetter->listFailed($id);
+        $nextAfter = $id === null && count($rows) === $limit ? array_last($rows)->id : null;
 
         if ($json) {
-            // the ONLY channel this command had truncated the one thing it exists to deliver: the
-            // cause of a publication failure, cut at sixty characters, leaving an operator to query
-            // `es_outbox` by hand mid-incident. Here the error travels whole
-            $output->writeln(json_encode([
+            $document = [
                 'messages' => array_map(static fn (FailedOutboxMessage $row): array => [
                     'id' => $row->id,
                     'position' => $row->position,
@@ -157,7 +182,17 @@ final class OutboxFailedCommand extends Command
                     'failed_at' => $row->failedAt,
                     'last_error' => $row->lastError,
                 ], $rows),
-            ], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            ];
+            if ($id === null) {
+                $document['pagination'] = ['limit' => $limit, 'after' => $after, 'next_after' => $nextAfter];
+            }
+            $output->writeln(json_encode($document, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+            return Command::SUCCESS;
+        }
+
+        if ($rows === []) {
+            $io->success($after === 0 ? 'No dead-lettered outbox messages.' : sprintf('No dead-lettered outbox messages after id %d.', $after));
 
             return Command::SUCCESS;
         }
@@ -173,28 +208,21 @@ final class OutboxFailedCommand extends Command
                 self::shorten($row->lastError),
             ], $rows),
         );
-        $rows
-            |> count(...)
-            |> (static fn ($x) => sprintf(' <comment>%d dead-lettered message(s).</comment>', $x))
-            |> $io->writeln(...);
+        $io->writeln(sprintf(' <comment>%d dead-lettered message(s)%s.</comment>', count($rows), $id === null ? ' on this page' : ''));
+        if ($nextAfter !== null) {
+            $io->text(sprintf('Continue inspection with --limit=%d --after=%d; the next page may be empty.', $limit, $nextAfter));
+        }
 
         return Command::SUCCESS;
     }
 
     /**
-     * Requeue, with no interlock, unlike its `purge()` sibling.
-     *
-     * The asymmetry is a difference in kind, not an oversight. A purge discards the only record of why
-     * a publication failed, while a requeue fulfills the intent the outbox already held, and
-     * republishing once the root cause is fixed is this command's designed ending. The count an
-     * operator wants before a bulk requeue sits one keystroke away in the default form, which lists
-     * the rows and totals them, so a prompt here would tax the normal gesture to restate a number the
-     * previous command already printed.
+     * Requeue a single explicitly identified row without a confirmation prompt.
      *
      * @throws JsonException when the machine document cannot be encoded
      * @throws Exception on a DBAL failure of the requeue update
      */
-    private function requeue(SymfonyStyle $io, OutputInterface $output, ?int $id, bool $json): int
+    private function requeue(SymfonyStyle $io, OutputInterface $output, int $id, bool $json): int
     {
         $count = $this->deadLetter->requeue($id);
 
@@ -207,6 +235,41 @@ final class OutboxFailedCommand extends Command
         $count > 0
             ? $io->success(sprintf('Re-queued %d message(s) to pending — run storm:outbox:relay to republish.', $count))
             : $io->warning('No dead-lettered message to requeue.');
+
+        return Command::SUCCESS;
+    }
+
+    /**
+     * @param  positive-int  $limit
+     * @param  non-negative-int  $after
+     * @param  non-empty-string|null  $type
+     *
+     * @throws JsonException when the machine document cannot be encoded
+     * @throws Exception on a DBAL failure of the requeue update
+     */
+    private function requeuePage(SymfonyStyle $io, OutputInterface $output, bool $json, int $limit, int $after, ?string $type): int
+    {
+        $ids = $this->deadLetter->requeuePage($after, $limit, $type);
+        $count = count($ids);
+        $nextAfter = $ids === [] ? null : max($ids);
+        if ($json) {
+            $output->writeln(json_encode([
+                'requeued' => $count,
+                'type' => $type,
+                'pagination' => ['limit' => $limit, 'after' => $after, 'next_after' => $nextAfter],
+            ], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT));
+
+            return Command::SUCCESS;
+        }
+
+        if ($nextAfter === null) {
+            $io->warning('No dead-lettered message to requeue. Nothing matched when candidates were locked; repeat the same scope before concluding recovery is complete.');
+
+            return Command::SUCCESS;
+        }
+
+        $io->success(sprintf('Re-queued %d message(s) to pending; run storm:outbox:relay to republish.', $count));
+        $io->text(sprintf('Continue with --retry --limit=%d --after=%d%s; the next page may be empty.', $limit, $nextAfter, $type === null ? '' : ', keeping the same --type filter'));
 
         return Command::SUCCESS;
     }
@@ -280,8 +343,6 @@ final class OutboxFailedCommand extends Command
 
         // `last_error` can be multi-line, a class plus its cause chain, so collapse to keep the table one row tall;
         // the full value stays in the column for whoever queries it.
-        $oneLine = preg_replace('/\s+/', ' ', $error) ?? $error; // null only on a PCRE error, so keep the raw text
-
-        return mb_strlen($oneLine) > 60 ? mb_substr($oneLine, 0, 57).'…' : $oneLine;
+        return $error |> Str::oneLine(...) |> Str::excerpt(60);
     }
 }

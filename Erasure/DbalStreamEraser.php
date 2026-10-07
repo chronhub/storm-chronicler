@@ -58,19 +58,18 @@ final readonly class DbalStreamEraser implements StreamEraser
             // what lets the planner prune to ONE partition and ride the (category, stream, version)
             // index; without it, an erase seq-scans every partition of the store.
             $removed = (int) $this->connection->executeStatement(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'DELETE FROM event_store WHERE category = :category AND stream = :stream',
                 ['category' => $category, 'stream' => $stream],
             );
 
-            // The stream's outbox rows die with it, in the SAME transaction: an es_outbox row is
-            // self-carrying, holding header and content, so a survivor would later publish an event of
-            // a stream that no longer exists. Every row still in this table is undelivered by
+            // The stream's publication-index rows die with it in the SAME transaction, so no work
+            // remains for events whose payload has been erased. Every row still in this table is undelivered by
             // construction, pending or dead-lettered, since a delivered one has already left it,
             // deleted or moved to the archive. That archive is the delivery audit and is NOT the
             // stream's to erase.
             $this->connection->executeStatement(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'DELETE FROM es_outbox WHERE partition_key = :stream',
                 ['stream' => $stream],
             );

@@ -14,6 +14,7 @@ use Storm\Chronicler\Erasure\CacheEvictingStreamEraser;
 use Storm\Chronicler\Erasure\StreamEraser;
 use Storm\Clock\FrozenClock;
 use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
@@ -32,8 +33,8 @@ final class CategoryCachedStreamExistenceTest extends TestCase
 
         $cache = $this->cache($inner);
 
-        $this->assertTrue($cache->hasCategory('order'));
-        $this->assertTrue($cache->hasCategory('order')); // second answer comes from the set
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order')));
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // second answer comes from the set
     }
 
     #[Test]
@@ -44,8 +45,8 @@ final class CategoryCachedStreamExistenceTest extends TestCase
 
         $cache = $this->cache($inner);
 
-        $this->assertTrue($cache->hasCategory(' ORDER '));
-        $this->assertTrue($cache->hasCategory('order')); // same key once normalized
+        $this->assertTrue($cache->hasCategory(new StreamCategory(' ORDER ')));
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // same key once normalized
     }
 
     #[Test]
@@ -59,12 +60,12 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $clock = FrozenClock::fromNow();
         $cache = $this->cache($inner, $clock);
 
-        $this->assertFalse($cache->hasCategory('order'));
-        $this->assertFalse($cache->hasCategory('order')); // within the TTL: remembered, no probe
+        $this->assertFalse($cache->hasCategory(new StreamCategory('order')));
+        $this->assertFalse($cache->hasCategory(new StreamCategory('order'))); // within the TTL: remembered, no probe
 
         $clock->advance(31);
 
-        $this->assertTrue($cache->hasCategory('order')); // TTL expired: re-probed, never a durable lie
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // TTL expired: re-probed, never a durable lie
     }
 
     #[Test]
@@ -81,15 +82,15 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $clock = FrozenClock::fromNow();
         $cache = new CategoryCachedStreamExistence($inner, $clock);
 
-        $this->assertFalse($cache->hasCategory('order')); // the probe that establishes the negative
+        $this->assertFalse($cache->hasCategory(new StreamCategory('order'))); // the probe that establishes the negative
 
         $clock->advance(29);
 
-        $this->assertFalse($cache->hasCategory('order')); // one second short of the window: remembered
+        $this->assertFalse($cache->hasCategory(new StreamCategory('order'))); // one second short of the window: remembered
 
         $clock->advance(1);
 
-        $this->assertTrue($cache->hasCategory('order')); // the window is over: probed again, and it lives
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // the window is over: probed again, and it lives
     }
 
     #[Test]
@@ -115,7 +116,7 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $cache = $this->cache($inner);
 
         $this->assertTrue($cache->hasStream(new StreamName('order-1')));
-        $this->assertTrue($cache->hasCategory('order')); // proven by the stream, no reprobe
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // proven by the stream, no reprobe
     }
 
     #[Test]
@@ -133,12 +134,12 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $clock = FrozenClock::fromNow();
         $cache = $this->cache($inner, $clock);
 
-        $this->assertFalse($cache->hasCategory('order')); // primes the remembered negative
+        $this->assertFalse($cache->hasCategory(new StreamCategory('order'))); // primes the remembered negative
 
         // the category was just born, by a first append elsewhere: the exact question sees it NOW,
         // not one TTL later, and the confirmed stream re-proves the category for free
         $this->assertTrue($cache->hasStream(new StreamName('order-1')));
-        $this->assertTrue($cache->hasCategory('order')); // fed by the confirmed stream, no reprobe
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // fed by the confirmed stream, no reprobe
     }
 
     #[Test]
@@ -149,9 +150,9 @@ final class CategoryCachedStreamExistenceTest extends TestCase
 
         $cache = $this->cache($inner);
 
-        $this->assertTrue($cache->hasCategory('order'));
-        $cache->forgetCategory('order');
-        $this->assertTrue($cache->hasCategory('order')); // reprobed after the eviction
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order')));
+        $cache->forgetCategory(new StreamCategory('order'));
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // reprobed after the eviction
     }
 
     #[Test]
@@ -164,7 +165,7 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $cache = $this->cache($inner);
 
         for ($i = 0; $i <= 1000; $i++) {
-            $this->assertFalse($cache->hasCategory('g'.$i));
+            $this->assertFalse($cache->hasCategory(new StreamCategory('g'.$i)));
         }
 
         // every remembered negative was still live at the 1001st insert, so the sweep reset the map
@@ -182,13 +183,13 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $cache = $this->cache($inner, $clock);
 
         for ($i = 0; $i < 500; $i++) {
-            $cache->hasCategory('old'.$i);
+            $cache->hasCategory(new StreamCategory('old'.$i));
         }
 
         $clock->advance(31); // the 500 negatives above are now expired
 
         for ($i = 0; $i <= 500; $i++) {
-            $cache->hasCategory('new'.$i);
+            $cache->hasCategory(new StreamCategory('new'.$i));
         }
 
         // the cap hit at the 501st fresh insert: the sweep dropped the 500 expired, kept the live ones
@@ -203,7 +204,7 @@ final class CategoryCachedStreamExistenceTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        $this->cache($inner)->hasCategory('order-42');
+        $this->cache($inner)->hasCategory(new StreamCategory('order-42'));
     }
 
     #[Test]
@@ -212,14 +213,14 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $inner = $this->createMock(StreamExistence::class);
         $inner->expects($this->exactly(2))->method('hasCategory')->with('order')->willReturn(true);
         $cache = $this->cache($inner);
-        $this->assertTrue($cache->hasCategory('order')); // seed the set
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // seed the set
 
         $innerEraser = $this->createMock(StreamEraser::class);
         $innerEraser->expects($this->once())->method('erase')->willReturn(3);
 
         new CacheEvictingStreamEraser($innerEraser, $cache)->erase(new StreamName('order-1'));
 
-        $this->assertTrue($cache->hasCategory('order')); // evicted, so this answer required a reprobe
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // evicted, so this answer required a reprobe
     }
 
     #[Test]
@@ -228,14 +229,14 @@ final class CategoryCachedStreamExistenceTest extends TestCase
         $inner = $this->createMock(StreamExistence::class);
         $inner->expects($this->once())->method('hasCategory')->with('order')->willReturn(true);
         $cache = $this->cache($inner);
-        $this->assertTrue($cache->hasCategory('order')); // seed the set
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // seed the set
 
         $innerEraser = $this->createMock(StreamEraser::class);
         $innerEraser->expects($this->once())->method('erase')->willReturn(0); // unknown stream
 
         new CacheEvictingStreamEraser($innerEraser, $cache)->erase(new StreamName('order-1'));
 
-        $this->assertTrue($cache->hasCategory('order')); // still served from the set, no reprobe
+        $this->assertTrue($cache->hasCategory(new StreamCategory('order'))); // still served from the set, no reprobe
     }
 
     private function cache(StreamExistence $inner, ?FrozenClock $clock = null): CategoryCachedStreamExistence

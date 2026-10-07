@@ -101,10 +101,10 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         // moves by arithmetic. So a batch whose claims are not exactly expected+1..expected+N must be
         // refused BEFORE the head moves, or stream_heads and the durable rows divorce and the next OCC
         // base is corrupt. N int comparisons on a path dominated by json_encode.
-        foreach ($messages as $i => $message) {
-            if ($message->aggregateVersion() !== $expectedVersion + $i + 1) {
-                throw IncoherentDecisionVersions::forStream($name, $expectedVersion + $i + 1, $message->aggregateVersion() ?? 'null', $i);
-            }
+        $at = array_find_key($messages, static fn (Message $message, int $i): bool => $message->aggregateVersion() !== $expectedVersion + $i + 1);
+
+        if ($at !== null) {
+            throw IncoherentDecisionVersions::forStream($name, $expectedVersion + $at + 1, $messages[$at]->aggregateVersion() ?? 'null', $at);
         }
 
         // The CAS head: fail fast before inserting. StreamHeadStore wraps every DBAL failure into
@@ -144,10 +144,11 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
 
         // The allocated range stamps the header, and through it the version column, since toRow
         // reads aggregateVersion(); a fact's position is decided here, never by the producer.
-        $version = $newVersion - count($messages);
-        foreach ($messages as $i => $message) {
-            $messages[$i] = $message->withHeader(Header::AggregateVersion, ++$version);
-        }
+        $messages = array_map(
+            static fn (Message $message, int $version): Message => $message->withHeader(Header::AggregateVersion, $version),
+            $messages,
+            range($newVersion - count($messages) + 1, $newVersion),
+        );
 
         $this->persist($streamName, $messages, $newVersion, occExpected: $newVersion, start: $start);
     }
@@ -209,7 +210,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
     public function committedHeadPosition(): ?Position
     {
         $position = $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT max(sequence_no) FROM event_store',
         );
 
@@ -354,11 +355,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         }
         // @codeCoverageIgnoreEnd
 
-        $rows = [];
-
-        foreach ($messages as $message) {
-            $rows[] = $this->persistence->toRow($streamName, $message);
-        }
+        $rows = array_map(fn (Message $message): array => $this->persistence->toRow($streamName, $message), $messages);
 
         $positions = [];
 
@@ -378,7 +375,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
             $placeholders = implode(', ', array_fill(0, count($chunk), '(?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb))'));
 
             $returned = $this->connection->fetchAllAssociative(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'INSERT INTO event_store (category, stream, version, type, event_version, header, content)
                  VALUES '.$placeholders.'
                  RETURNING version, sequence_no',
@@ -390,9 +387,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
             }
         }
 
-        $entries = [];
-
-        foreach ($rows as $row) {
+        return array_map(static function (array $row) use ($positions, $streamName): OutboxEntry {
             $version = (int) $row['version'];
             // The throw is a bug-marker, not a branch: Postgres guarantees RETURNING covers every row of a
             // successful multi-VALUES INSERT, or the whole statement aborts and throws first, a
@@ -402,14 +397,12 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
                 ?? throw new LogicException("Multi-VALUES RETURNING did not cover version {$version} of stream {$streamName->toString()}");
             // @codeCoverageIgnoreEnd
 
-            $entries[] = new OutboxEntry(
+            return new OutboxEntry(
                 $position,
                 $streamName->toString(),
                 (string) $row[SerializedMessage::TYPE],
                 (int) $row['event_version'],
             );
-        }
-
-        return $entries;
+        }, $rows);
     }
 }

@@ -9,10 +9,12 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Doctrine\DBAL\ParameterType;
 use Psr\Log\LoggerInterface;
+use Storm\Chronicler\Exception\InvalidInboxRetention;
 use Storm\Support\Dbal\BatchedDelete;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 use Throwable;
 
+use function array_last;
 use function count;
 use function hex2bin;
 use function sort;
@@ -85,9 +87,9 @@ final readonly class DbalInboxStore implements InboxStore
         return $this->connection->transactional(
             function (Connection $tx) use ($consumerId, $key, $consumer, $messageId, $handler): bool {
                 $inserted = $tx->executeStatement(
-                    /** @lang PostgreSQL */
                     // the conflict target is NAMED: only the dedup key may absorb a violation into
                     // "already processed"; any future constraint on the table stays loud
+                    /* language=PostgreSQL */
                     'INSERT INTO es_inbox (consumer_id, message_id) VALUES (:consumer, :message_id)
                      ON CONFLICT (consumer_id, message_id) DO NOTHING',
                     ['consumer' => $consumerId, 'message_id' => $key],
@@ -137,6 +139,7 @@ final readonly class DbalInboxStore implements InboxStore
      * The dedup records older than `$ageSeconds`: the v7 keys below the bound of that instant, by the
      * primary index over every consumer the table holds, plus the other keys by their `processed_at`.
      *
+     * @throws InvalidInboxRetention when the age is negative or predates the Unix epoch
      * @throws Exception on a DBAL failure
      */
     public function countPrunable(int $ageSeconds): int
@@ -144,13 +147,13 @@ final readonly class DbalInboxStore implements InboxStore
         // no consumer predicate: the count spans every consumer the table holds, and PostgreSQL
         // skips through the leading column of the primary index by itself
         $byKey = (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT count(*) FROM es_inbox WHERE '.self::V7_KEY.' AND message_id < :bound',
             ['bound' => $this->bound($ageSeconds)],
             ['bound' => ParameterType::BINARY],
         );
         $byAge = (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT count(*) FROM es_inbox WHERE '.self::PRUNABLE_BY_AGE,
             ['age' => $ageSeconds],
         );
@@ -180,6 +183,7 @@ final readonly class DbalInboxStore implements InboxStore
      * @param  positive-int  $batch
      * @return int rows pruned
      *
+     * @throws InvalidInboxRetention when the age is negative or predates the Unix epoch
      * @throws Exception on a DBAL delete failure
      */
     public function prune(int $ageSeconds, int $batch): int
@@ -190,8 +194,8 @@ final readonly class DbalInboxStore implements InboxStore
             $cursor = '';
             do {
                 $deleted = $this->connection->fetchFirstColumn(
-                    /** @lang PostgreSQL */
                     sprintf(
+                        /* language=PostgreSQL */
                         'DELETE FROM es_inbox WHERE ctid IN (
                             SELECT ctid FROM es_inbox
                             WHERE consumer_id = :consumer AND %s AND message_id > :cursor AND message_id < :bound
@@ -207,7 +211,7 @@ final readonly class DbalInboxStore implements InboxStore
                 if ($deleted !== []) {
                     // the hex of a key sorts as its bytes do: the largest hex is the largest key
                     sort($deleted, SORT_STRING);
-                    $cursor = (string) hex2bin((string) $deleted[count($deleted) - 1]);
+                    $cursor = (string) hex2bin((string) array_last($deleted));
                 }
             } while ($deleted !== []);
         }
@@ -219,16 +223,22 @@ final readonly class DbalInboxStore implements InboxStore
      * The v7 floor of the instant `$ageSeconds` ago, read on the database clock so the retention and
      * the rows' own timestamps agree.
      *
+     * @throws InvalidInboxRetention when the age is negative or predates the Unix epoch
      * @throws Exception on a DBAL failure
      */
     private function bound(int $ageSeconds): string
     {
-        $milliseconds = (int) $this->connection->fetchOne(
+        $nowMilliseconds = (int) $this->connection->fetchOne(
             /* language=PostgreSQL */
-            'SELECT ((EXTRACT(EPOCH FROM now()) - CAST(:age AS bigint)) * 1000)::bigint',
-            ['age' => $ageSeconds],
+            'SELECT (EXTRACT(EPOCH FROM now()) * 1000)::bigint',
         );
 
-        return InboxKey::v7Floor($milliseconds);
+        // Validate seconds before multiplication: even the largest parsed duration must fail
+        // without overflowing a bigint or wrapping the timestamp prefix into a future bound.
+        if ($ageSeconds < 0 || $ageSeconds > intdiv($nowMilliseconds, 1000)) {
+            throw InvalidInboxRetention::forAge($ageSeconds);
+        }
+
+        return InboxKey::v7Floor($nowMilliseconds - $ageSeconds * 1000);
     }
 }

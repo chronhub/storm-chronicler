@@ -186,6 +186,8 @@ final class MessageCheckCommand extends Command
             }
             if ($diagnosis !== null) {
                 [$suffix, $reason] = $diagnosis;
+                // @infection-ignore-all; equivalent: `%s` below renders the one false `json_encode()` can
+                // answer as the empty string the cast would produce, so the cast answers the analyzer alone
                 $aliasKey = (string) json_encode($aliasString, JSON_UNESCAPED_SLASHES);
                 $location = sprintf('events[%s]%s', $aliasKey, $suffix);
                 $io->error(sprintf(
@@ -203,9 +205,10 @@ final class MessageCheckCommand extends Command
 
         $events = $document['events'];
         if ($document['schema_version'] === 1) {
-            foreach ($events as $alias => $entry) {
-                $events[$alias] = ['class' => $entry['class'], 'version' => $entry['version'], 'replaces' => $entry['replaces']];
-            }
+            $events = array_map(
+                static fn (array $entry): array => ['class' => $entry['class'], 'version' => $entry['version'], 'replaces' => $entry['replaces']],
+                $events,
+            );
         }
         $diagnosis = self::diagnoseAliasClaims($events);
         if ($diagnosis !== null) {
@@ -287,6 +290,8 @@ final class MessageCheckCommand extends Command
             if (isset($seen[$key])) {
                 return [sprintf('.personal.keys[%d]', $index), 'must not duplicate another personal key'];
             }
+            // @infection-ignore-all; equivalent: a set, read by the `isset()` above alone, so the
+            // value is arbitrary
             $seen[$key] = true;
         }
 

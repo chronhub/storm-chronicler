@@ -28,7 +28,7 @@ final class EventStoreHighWaterSchema
     public static function up(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS event_store_high_water (
                     id          smallint       NOT NULL DEFAULT 1,
@@ -42,7 +42,7 @@ final class EventStoreHighWaterSchema
                 )
                 SQL,
             // Seed the singleton at floor 0; the advancer upserts on conflict, so this is just a convenience.
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             <<<'SQL'
                 INSERT INTO event_store_high_water (id, position) VALUES (1, 0) ON CONFLICT (id) DO NOTHING
                 SQL,
@@ -55,7 +55,7 @@ final class EventStoreHighWaterSchema
     public static function down(): array
     {
         return [
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DROP TABLE IF EXISTS event_store_high_water',
         ];
     }

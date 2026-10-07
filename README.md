@@ -61,7 +61,8 @@ relay and any transport-level consumer can never drift apart on how a row is rea
 
 ## Outbox / inbox
 
-- **Outbox**: rows are self-carrying (`header` + `content`); `storm:outbox:relay` publishes with
+- **Outbox**: rows index events by position; the relay reads `header` and `content` from
+  `event_store` when claiming publication work. `storm:outbox:relay` publishes with
   per-partition ordering (partition = the qualified stream), N-worker-safe through THREE guards — a
   transaction-scoped advisory lock per partition, a pending-head check after the claim (the
   row-first `SKIP LOCKED` batch may hand a worker the tail while a sibling holds the head's row
@@ -174,3 +175,31 @@ retry after the other transaction commits.
 
 Rows already stored in DEFAULT still require the existing manual migration procedure. Correcting
 the naming rule does not move those rows into a new child automatically.
+
+## Persistent request identities
+
+`IdempotencyRegistry` in Contracts binds lowercase SHA-256 digests of a caller scope and key to
+one fingerprint and message identity. Callers derive the scope from a trusted principal and tenant;
+this storage port does not authenticate a request. It stores no body, credential or raw client key.
+`DbalIdempotencyRegistry` commits the acquisition before returning. It refuses an ambient
+transaction so a caller rollback cannot erase the mapping after a network send.
+
+An identical retry returns the existing identity without extending its expiration. A different
+fingerprint raises the contracted `IdempotencyConflict` while the key is live. Keep the claim after
+an uncertain send and retry with the same inputs. The registry neither caches a response nor proves
+that a command was dispatched or executed; synchronous handlers receive no replay protection from it.
+
+`storm.idempotency.lifetime_seconds` defaults to 86400 and accepts 1 through 31536000 seconds.
+Expiration is fixed using the PostgreSQL clock on acquisition. A later configuration change affects
+new claims only. Once expired, a key can acquire a new identity even before cleanup. Consumer inbox
+retention must exceed the retry window plus the longest queue lag and redelivery horizon. This
+precondition is operational; the registry does not configure or enforce inbox retention.
+
+Run `storm:install` to create and verify `es_idempotency`. Its empty schema does not enable HTTP
+idempotency or alter the API bridge. Callers must explicitly use the port. Existing HTTP identities
+cannot be migrated into scoped claims because their hash has lost the principal and fingerprint;
+a consumer adopting the registry needs a drained cutover and fresh client keys.
+
+`storm:idempotency:prune --dry-run` counts expired claims; `--batch=1000` removes them in short,
+lock-skipping batches. A locked claim can remain for the next maintenance run. Purging does not
+shorten a live window, and the return count covers only rows this run removed.

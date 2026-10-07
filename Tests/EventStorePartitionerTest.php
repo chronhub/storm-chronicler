@@ -5,11 +5,17 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Tests;
 
 use Doctrine\DBAL\Connection;
-use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 use Storm\Chronicler\Store\EventStorePartitioner;
+use Storm\Stream\Exception\InvalidStreamException;
+
+use function hash;
+use function str_contains;
+use function str_repeat;
+use function substr;
 
 final class EventStorePartitionerTest extends TestCase
 {
@@ -46,12 +52,25 @@ final class EventStorePartitionerTest extends TestCase
     }
 
     #[Test]
+    public function test_an_invalid_category_raises_the_contracted_stream_exception(): void
+    {
+        // the same rule as StreamName, so the same contracted exception; an SPL InvalidArgumentException
+        // escapes the package's exception surface for a value every other entry refuses as a stream fault
+        $connection = $this->createMock(Connection::class);
+        $connection->expects($this->never())->method('executeStatement');
+
+        $this->expectException(InvalidStreamException::class);
+
+        new EventStorePartitioner($connection)->createPartitions(['Bad-Category']);
+    }
+
+    #[Test]
     public function it_rejects_a_category_that_is_not_a_valid_stream_category_before_touching_the_db(): void
     {
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())->method('executeStatement');
 
-        $this->expectException(InvalidArgumentException::class);
+        $this->expectException(InvalidStreamException::class);
 
         // 'Bad-Category' breaks StreamName::CATEGORY_REGEX, uppercase and hyphen, a config error.
         new EventStorePartitioner($connection)->createPartitions(['Bad-Category']);
@@ -85,7 +104,7 @@ final class EventStorePartitionerTest extends TestCase
             try {
                 $partitioner->createPartitions([$category]);
                 $this->fail(sprintf('expected the refusal of "%s"', $category));
-            } catch (InvalidArgumentException) {
+            } catch (InvalidStreamException) {
                 // refused before any statement, the mock above asserts none ever ran
             }
         }
@@ -135,5 +154,64 @@ final class EventStorePartitionerTest extends TestCase
         $connection->method('fetchOne')->willReturn(false);
 
         self::assertFalse(new EventStorePartitioner($connection)->verify('account'));
+    }
+
+    #[Test]
+    public function a_long_category_keeps_a_bounded_prefix_and_a_hash_of_its_whole_name(): void
+    {
+        // the budget is the limit minus the prefix and the nine characters of `_` and eight hex:
+        // what survives of the category and which part of its hash follow from that arithmetic alone
+        $category = 'x'.str_repeat('a', 39).'z';
+
+        self::assertSame(
+            'event_store_p_xaaaaaaaa_'.substr(hash('sha256', $category), 0, 8),
+            $this->partitioner('32')->partitionName($category),
+        );
+    }
+
+    #[Test]
+    public function a_category_whose_prefixed_name_fits_exactly_keeps_it_whole(): void
+    {
+        $category = str_repeat('b', 18);
+
+        self::assertSame('event_store_p_'.$category, $this->partitioner('32')->partitionName($category));
+    }
+
+    #[Test]
+    public function the_smallest_budget_still_names_the_partition_and_a_smaller_one_is_refused(): void
+    {
+        $category = str_repeat('c', 12);
+
+        self::assertSame('event_store_p_c_'.substr(hash('sha256', $category), 0, 8), $this->partitioner('24')->partitionName($category));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('limit 23 is too small');
+
+        $this->partitioner('23')->partitionName($category);
+    }
+
+    #[Test]
+    public function a_generated_name_another_relation_already_holds_is_refused(): void
+    {
+        $connection = $this->createMock(Connection::class);
+        $connection->method('fetchOne')->willReturnCallback(static fn (string $sql, array $params = []): string|false => match (true) {
+            str_contains($sql, 'max_identifier_length') => '63',
+            ($params['name'] ?? null) === 'event_store_p_account' => 'r unpartitioned',
+            default => false,
+        });
+        $connection->expects($this->never())->method('executeStatement');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('"event_store_p_account" is occupied by r unpartitioned');
+
+        new EventStorePartitioner($connection)->createPartitions(['account']);
+    }
+
+    private function partitioner(string $limit): EventStorePartitioner
+    {
+        $connection = $this->createStub(Connection::class);
+        $connection->method('fetchOne')->willReturnCallback(static fn (string $sql): string|false => str_contains($sql, 'max_identifier_length') ? $limit : false);
+
+        return new EventStorePartitioner($connection);
     }
 }

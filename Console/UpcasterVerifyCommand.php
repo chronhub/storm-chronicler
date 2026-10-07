@@ -76,7 +76,9 @@ final class UpcasterVerifyCommand extends Command
 
         if ($input->getOption('json') === true) {
             // a deployment gate is scripted by definition: the verdict rides the exit code, the reasons
-            // ride the document, and neither has to be scraped out of an error block
+            // ride the document, and neither has to be scraped out of an error block. An anomaly's
+            // public properties encode to the very shape `toArray()` builds, so dropping the mapping is
+            // an equivalent mutant, left unignored on purpose: this statement's flag mutants are killed
             $output->writeln(json_encode(
                 [
                     'conformant' => $problems === [],

@@ -7,11 +7,9 @@ namespace Storm\Chronicler\Directory;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 use Storm\Chronicler\Exception\StorageFailure;
-use Storm\Stream\Exception\InvalidStreamException;
+use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
-
-use function Symfony\Component\String\u;
 
 /**
  * Postgres StreamExistence on Doctrine DBAL, reading the two authoritative sides of the store.
@@ -37,7 +35,7 @@ final readonly class DbalStreamExistence implements StreamExistence
     {
         try {
             return $this->connection->fetchOne(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'SELECT 1 FROM stream_heads WHERE stream = :stream',
                 ['stream' => $streamName->toString()],
             ) !== false;
@@ -46,19 +44,13 @@ final readonly class DbalStreamExistence implements StreamExistence
         }
     }
 
-    public function hasCategory(string $category): bool
+    public function hasCategory(StreamCategory $category): bool
     {
-        $category = u($category)->trim()->lower()->toString();
-
-        if ($category === '' || ! preg_match(StreamName::CATEGORY_REGEX, $category)) {
-            throw InvalidStreamException::invalidCategory($category);
-        }
-
         try {
             return $this->connection->fetchOne(
-                /** @lang PostgreSQL */
+                /* language=PostgreSQL */
                 'SELECT 1 FROM event_store WHERE category = :category LIMIT 1',
-                ['category' => $category],
+                ['category' => $category->value],
             ) !== false;
         } catch (Exception $e) {
             throw StorageFailure::wrap('the category existence read', $e);

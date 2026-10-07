@@ -757,6 +757,55 @@ final class MessageCheckCommandTest extends TestCase
         self::assertStringContainsString('not judged', self::flat($tester));
     }
 
+    #[Test]
+    public function a_current_catalogue_the_runtime_disagrees_with_says_so_before_listing_why(): void
+    {
+        $current = [...self::v2Entry(), 'personal' => ['subject' => 'id', 'keys' => ['name']]];
+        $tester = $this->checkV2(['customer.created' => self::v2Entry()], ['customer.created' => $current], self::v2Map());
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('The current catalogue disagrees with the current runtime; the message contract was not judged.', self::flat($tester));
+    }
+
+    #[Test]
+    public function a_personal_subject_or_key_made_of_blanks_is_refused_as_blank(): void
+    {
+        foreach ([
+            '.personal.subject' => ['subject' => '   ', 'keys' => ['name']],
+            '.personal.keys[0]' => ['subject' => 'id', 'keys' => ['   ']],
+        ] as $location => $context) {
+            $tester = $this->checkV2(['customer.created' => self::v2Entry()], ['customer.created' => [...self::v2Entry(), 'personal' => $context]], self::v2Map());
+
+            self::assertSame(Command::FAILURE, $tester->getStatusCode());
+            self::assertStringContainsString('events["customer.created"]'.$location.': must be a non-blank string', self::flat($tester));
+        }
+    }
+
+    #[Test]
+    public function two_catalogues_in_a_format_this_binary_cannot_read_are_not_judged(): void
+    {
+        $unreadable = $this->catalogue(['order.placed' => $this->entry()], 99);
+        $tester = $this->check($unreadable, $unreadable);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('format version 99', self::flat($tester));
+        self::assertStringNotContainsString('compatible', self::flat($tester));
+    }
+
+    #[Test]
+    public function an_alias_that_reads_as_a_number_is_validated_as_the_text_it_is(): void
+    {
+        // a JSON key that reads as a number decodes to an integer array key; the validation still
+        // reads the alias as the text the document wrote, and locates its refusal the same way
+        $numeric = $this->file((string) json_encode(['schema_version' => CatalogueCompatibility::SCHEMA_VERSION, 'events' => (object) ['123' => $this->entry()]]));
+        $replacing = $this->file((string) json_encode(['schema_version' => CatalogueCompatibility::SCHEMA_VERSION, 'events' => (object) ['123' => [...$this->entry(), 'replaces' => ['123']]]]));
+
+        $tester = $this->check($replacing, $numeric);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('events["123"].replaces[0]: cannot replace its own alias', self::flat($tester));
+    }
+
     private static function assertSemanticV2Failure(CommandTester $tester, string $reason): void
     {
         self::assertSame(Command::FAILURE, $tester->getStatusCode());

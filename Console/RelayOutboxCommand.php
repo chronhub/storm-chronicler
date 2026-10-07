@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Storm\Chronicler\Console;
 
+use Closure;
 use Override;
 use Storm\Chronicler\Outbox\OutboxDrainIncomplete;
 use Storm\Chronicler\Outbox\OutboxDrainResult;
@@ -45,6 +46,8 @@ final class RelayOutboxCommand extends Command
 
     public function __construct(
         private readonly OutboxRelay $relay,
+        /** Runs after a worker iteration; callback failures do not change delivery outcomes. */
+        private readonly ?Closure $afterIteration = null,
     ) {
         parent::__construct();
     }
@@ -73,7 +76,11 @@ final class RelayOutboxCommand extends Command
         }
 
         try {
-            $result = $this->relay->drain($batch);
+            try {
+                $result = $this->relay->drain($batch);
+            } finally {
+                $this->drainTelemetry();
+            }
         } catch (OutboxDrainIncomplete $e) {
             // A transient publishing failure: the relay fails FORWARD; what it reports here is
             // committed, namely published rows, dead-letters, the bumped back-off; the tail stays
@@ -221,7 +228,11 @@ final class RelayOutboxCommand extends Command
 
         $this->daemonLoop(function () use ($io, $batch, &$published, &$failed, &$stalled): int {
             try {
-                $result = $this->relay->drain($batch);
+                try {
+                    $result = $this->relay->drain($batch);
+                } finally {
+                    $this->drainTelemetry();
+                }
                 // Stalled rows are NOT work: nothing moved, and counting them as a busy tick would
                 // spin the loop instead of polling.
                 $work = $result->published + $result->failed;
@@ -272,5 +283,13 @@ final class RelayOutboxCommand extends Command
         ));
 
         return Command::SUCCESS;
+    }
+
+    private function drainTelemetry(): void
+    {
+        try {
+            ($this->afterIteration)?->__invoke();
+        } catch (Throwable) {
+        }
     }
 }

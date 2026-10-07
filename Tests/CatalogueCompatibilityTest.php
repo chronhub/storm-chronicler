@@ -422,6 +422,99 @@ final class CatalogueCompatibilityTest extends TestCase
         ));
     }
 
+    #[Test]
+    public function a_shared_claim_does_not_end_the_judgement_of_the_aliases_after_it(): void
+    {
+        $problems = $this->compatibility()->verdicts(
+            ['a' => $this->entry(), 'z' => $this->entry(version: 2)],
+            ['a1' => $this->entry(replaces: ['a']), 'a2' => $this->entry(class: 'App\Other', replaces: ['a']), 'z' => $this->entry()],
+        );
+
+        self::assertCount(2, $problems, implode("\n", $problems));
+        self::assertStringContainsString('"a" is claimed by more than one current event', $problems[0]);
+        self::assertStringContainsString('"z" went from schema version 2 down to 1', $problems[1]);
+    }
+
+    #[Test]
+    public function an_unchanged_historical_alias_does_not_end_the_judgement_of_the_aliases_after_it(): void
+    {
+        // `old1` still resolves where it did and is skipped; `old2` moved to a new canonical whose
+        // chain lacks the step, and must still be judged
+        $problems = $this->compatibility()->verdicts(
+            ['x' => $this->entry(version: 2, replaces: ['old1']), 'y' => $this->entry(version: 2, replaces: ['old2'])],
+            ['x' => $this->entry(version: 2, replaces: ['old1']), 'y' => $this->entry(version: 2), 'w' => $this->entry(class: 'App\W', version: 2, replaces: ['old2'])],
+        );
+
+        self::assertCount(1, $problems, implode("\n", $problems));
+        self::assertStringContainsString('"old2" (canonical "w") requires an upcaster for the step v1 to v2', $problems[0]);
+    }
+
+    #[Test]
+    public function every_alias_that_went_down_is_reported_not_only_the_first(): void
+    {
+        $problems = $this->compatibility()->verdicts(
+            ['a' => $this->entry(version: 2), 'z' => $this->entry(version: 2)],
+            ['a' => $this->entry(), 'z' => $this->entry()],
+        );
+
+        self::assertCount(2, $problems, implode("\n", $problems));
+        self::assertStringContainsString('"a" went from schema version 2 down to 1', $problems[0]);
+        self::assertStringContainsString('"z" went from schema version 2 down to 1', $problems[1]);
+    }
+
+    #[Test]
+    public function an_upcaster_that_cannot_be_probed_does_not_end_the_judgement_of_the_aliases_after_it(): void
+    {
+        $refusing = new readonly class() implements Upcaster
+        {
+            public function supports(string $alias, int $fromVersion): bool
+            {
+                return $alias === 'a' ? throw new RuntimeException('cannot say') : false;
+            }
+
+            public function upcast(array $payload): array
+            {
+                return $payload;
+            }
+        };
+
+        $problems = new CatalogueCompatibility(new UpcasterChain([$refusing]))->verdicts(
+            ['a' => $this->entry(), 'z' => $this->entry(version: 2)],
+            ['a' => $this->entry(version: 2), 'z' => $this->entry()],
+        );
+
+        self::assertCount(2, $problems, implode("\n", $problems));
+        self::assertStringStartsWith('alias "a": ', $problems[0]);
+        self::assertStringContainsString('"z" went from schema version 2 down to 1', $problems[1]);
+    }
+
+    #[Test]
+    public function a_historical_personal_declaration_under_an_unchanged_class_is_no_class_change(): void
+    {
+        $entry = [...$this->entry(class: 'App\C'), 'personal' => ['subject' => 'id', 'keys' => ['name']]];
+
+        self::assertSame([], $this->compatibility()->verdicts(['c' => $entry], ['c' => $entry]));
+    }
+
+    #[Test]
+    public function an_alias_the_runtime_agrees_with_does_not_end_the_runtime_check(): void
+    {
+        // one alias with no personal data on either side, one matching the runtime exactly, and
+        // only the two that disagree are named, each of them
+        $personal = ['App\P' => ['subject' => 'id', 'keys' => ['name', 'email'], 'fallbacks' => ['name' => null, 'email' => null]]];
+        $problems = new CatalogueCompatibility(new UpcasterChain, $personal)->currentPersonalMismatches([
+            'plain' => $this->entry(class: 'App\Plain'),
+            'good' => [...$this->entry(class: 'App\P'), 'personal' => ['subject' => 'id', 'keys' => ['email', 'name']]],
+            'bad' => [...$this->entry(class: 'App\P'), 'personal' => ['subject' => 'other', 'keys' => ['name', 'email']]],
+            'worse' => [...$this->entry(class: 'App\P'), 'personal' => ['subject' => 'id', 'keys' => ['name']]],
+        ]);
+
+        self::assertSame([
+            'alias "bad" does not match the current runtime personal declaration; the message contract was not judged',
+            'alias "worse" does not match the current runtime personal declaration; the message contract was not judged',
+        ], $problems);
+    }
+
     private function compatibility(?Upcaster $upcaster = null): CatalogueCompatibility
     {
         return new CatalogueCompatibility(new UpcasterChain($upcaster === null ? [] : [$upcaster]));

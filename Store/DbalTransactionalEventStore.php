@@ -19,9 +19,8 @@ use Symfony\Component\DependencyInjection\Attribute\AutowireDecorated;
  * or rolls back together. Inside such a caller-owned transaction this decorator stands down, like
  * the retry decorator: no savepoint pair around the append. What a pair would buy is a caller
  * that catches an append which ABORTED the transaction, `DuplicateVersion` on the stream version
- * backstop or an outbox identity collision, and goes on in that same transaction; no caller does
- * (storm-internal #589, the inventory), every one lets it roll back, and a savepoint cost a round
- * trip per append, 2.7 million per flood. The contract inside a caller transaction is therefore:
+ * backstop or an outbox identity collision, and continues in that same transaction. Without
+ * savepoints, the caller owns rollback after an abort. The contract inside a caller transaction is:
  * a `StaleVersion` aborts nothing and the caller may go on; a `DuplicateVersion` leaves the
  * transaction aborted and the caller can only roll it back, the connection clean afterwards.
  *

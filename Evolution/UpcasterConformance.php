@@ -160,19 +160,17 @@ final readonly class UpcasterConformance
                 continue;
             }
 
-            foreach ($audit->missing as $step) {
-                $anomalies[] = new ConformanceAnomaly(
+            $anomalies = [
+                ...$anomalies,
+                ...array_map(static fn (int $step): ConformanceAnomaly => new ConformanceAnomaly(
                     type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::MissingStep,
                     problem: sprintf('stored type %s (floor v%d, current v%d): no upcaster for the step v%d to v%d — rows below the gap are unreadable', $label, $floor, $current, $step, $step + 1),
-                );
-            }
-
-            foreach ($audit->duplicated as $step) {
-                $anomalies[] = new ConformanceAnomaly(
+                ), $audit->missing),
+                ...array_map(static fn (int $step): ConformanceAnomaly => new ConformanceAnomaly(
                     type: $type, floor: $floor, current: $current, ceiling: $ceiling, kind: AnomalyKind::DuplicatedStep,
                     problem: sprintf('stored type %s: more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order', $label, $step, $step + 1),
-                );
-            }
+                ), $audit->duplicated),
+            ];
         }
 
         return $anomalies;

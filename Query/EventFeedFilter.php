@@ -22,7 +22,8 @@ use Storm\Stream\StreamName;
  * The scope is a single {@see \Storm\Stream\StreamName}, not a separate category and stream: `category` is
  * `split_part(stream, '-', 1)`, enforced by a DB CHECK, so the two can never legitimately diverge;
  * the VO makes that unrepresentable. A bare `StreamName('account')` scopes to the whole category; a
- * qualified `StreamName('account')->withQualifier($id)` scopes to one aggregate. Both predicates are
+ * qualified `StreamName('account')->withQualifier($id)` scopes to one aggregate. `exactStream` also
+ * narrows a bare name to that exact stream, without changing the default category selection. Both predicates are
  * still emitted when qualified: `category` is the partition-prune key and the leading column of the
  * `UNIQUE (category, stream, version)` index, redundant in data but load-bearing in the plan.
  *
@@ -40,7 +41,7 @@ final class EventFeedFilter implements MutableQueryFilter
 
     /**
      * @param  StreamName|null  $scope  null selects every stream; a bare category selects the whole
-     *                                  category; a qualified name selects one exact stream, a category
+     *                                  category unless `exactStream` is true; a qualified name selects one exact stream, a category
      *                                  prune plus a stream narrow
      * @param  list<string>|null  $types  stored type strings, alias-resolved by the caller; null or
      *                                    `[]` selects all types with no `type` clause
@@ -48,6 +49,7 @@ final class EventFeedFilter implements MutableQueryFilter
     public function __construct(
         private readonly ?StreamName $scope = null,
         private readonly ?array $types = null,
+        private readonly bool $exactStream = false,
     ) {}
 
     public function window(int $after, int $head, int $limit): void
@@ -69,7 +71,7 @@ final class EventFeedFilter implements MutableQueryFilter
         if ($this->scope !== null) {
             $qb->andWhere('e.category = :feedCategory')->setParameter('feedCategory', $this->scope->category);
 
-            if ($this->scope->qualifier !== null) {
+            if ($this->exactStream || $this->scope->qualifier !== null) {
                 $qb->andWhere('e.stream = :feedStream')->setParameter('feedStream', $this->scope->toString());
             }
         }

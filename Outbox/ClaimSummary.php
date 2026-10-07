@@ -41,7 +41,8 @@ final readonly class ClaimSummary
      */
     public function partitions(): array
     {
-        return array_keys($this->count);
+        // PHP stores a key like `42` as an integer, so the keys go back to the strings the rows carry
+        return array_map(strval(...), array_keys($this->count));
     }
 
     public function countFor(string $partition): int

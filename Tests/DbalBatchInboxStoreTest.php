@@ -7,6 +7,7 @@ namespace Storm\Chronicler\Tests;
 use Closure;
 use Doctrine\DBAL\Connection;
 use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\MockObject\Stub;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Storm\Chronicler\Inbox\DbalBatchInboxStore;
@@ -18,9 +19,11 @@ use function array_key_exists;
 use function array_map;
 use function bin2hex;
 use function count;
+use function in_array;
 use function range;
 use function sort;
 use function sprintf;
+use function strcmp;
 
 /**
  * The batch store's contract, unit-pinned with the Connection mocked: ONE multi-VALUES dedup INSERT,
@@ -202,6 +205,47 @@ final class DbalBatchInboxStoreTest extends TestCase
         $this->assertSame([1, $keys[0], 1, $keys[1], 1, $keys[2]], $capturedParams);
     }
 
+    #[Test]
+    public function records_each_skipped_key_once_with_its_occurrences_in_key_order(): void
+    {
+        // two ids an earlier batch recorded, skipped three times in all: one UPDATE carries each key
+        // once with how often it was skipped, sorted on the key whatever order the batch skipped
+        // them in, then the consumer. The batch skips the higher key first, so the order is the sort's
+        [$low, $high] = strcmp(bin2hex(InboxKey::encode('a')), bin2hex(InboxKey::encode('b'))) < 0 ? ['a', 'b'] : ['b', 'a'];
+        $recorded = [bin2hex(InboxKey::encode('a')), bin2hex(InboxKey::encode('b'))];
+        $connection = $this->connection(insertedFor: static fn (string $key): bool => ! in_array($key, $recorded, true));
+        $updates = [];
+        $connection->method('executeStatement')
+            ->willReturnCallback(static function (string $sql, array $params) use (&$updates): int {
+                $updates[] = [$sql, $params];
+
+                return count($params);
+            });
+
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', [
+            new InboxItem($high, static function (): void {}),
+            new InboxItem('fresh', static function (): void {}),
+            new InboxItem($low, static function (): void {}),
+            new InboxItem($high, static function (): void {}),
+        ]);
+
+        $this->assertSame([false, true, false, false], $ran);
+        $this->assertCount(1, $updates);
+        $this->assertStringContainsString("VALUES (decode(?, 'hex'), CAST(? AS bigint)), (decode(?, 'hex'), CAST(? AS bigint)))", $updates[0][0]);
+        $this->assertSame([bin2hex(InboxKey::encode($low)), 1, bin2hex(InboxKey::encode($high)), 2, 1], $updates[0][1]);
+    }
+
+    #[Test]
+    public function a_batch_without_a_skipped_item_records_no_duplicate(): void
+    {
+        $connection = $this->connection(insertedFor: static fn (string $key): bool => true);
+        $connection->method('executeStatement')->willThrowException(new RuntimeException('no duplicate to record'));
+
+        $ran = new DbalBatchInboxStore($connection, new InboxConsumers($connection))->onceBatch('events', $this->items(3));
+
+        $this->assertSame([true, true, true], $ran);
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
@@ -214,6 +258,7 @@ final class DbalBatchInboxStoreTest extends TestCase
      * inserted earlier in the same statement or batch, PostgreSQL's intra-statement DO NOTHING.
      *
      * @param  Closure(string): bool  $insertedFor
+     * @return Connection&Stub
      */
     private function connection(Closure $insertedFor, int &$statements = 0): Connection
     {

@@ -6,9 +6,14 @@ namespace Storm\Chronicler\Evolution;
 
 use Storm\Chronicler\Exception\UpcasterFailed;
 
+use function array_column;
 use function array_diff;
+use function array_filter;
 use function array_key_exists;
 use function array_keys;
+use function array_map;
+use function array_merge;
+use function array_values;
 use function count;
 use function implode;
 use function sort;
@@ -147,9 +152,13 @@ final readonly class CatalogueCompatibility
                     if ($historicalPersonal['subject'] !== $currentPersonal['subject']) {
                         $problems[] = sprintf('alias %s changed its personal subject; historical encrypted fields bind the original subject', $label);
                     }
-                    foreach (array_diff($historicalPersonal['keys'], $currentPersonal['keys']) as $key) {
-                        $problems[] = sprintf('alias %s removed personal key "%s"; historical encrypted fields bind their original key', $label, $key);
-                    }
+                    $problems = [
+                        ...$problems,
+                        ...array_map(
+                            static fn (string $key): string => sprintf('alias %s removed personal key "%s"; historical encrypted fields bind their original key', $label, $key),
+                            array_diff($historicalPersonal['keys'], $currentPersonal['keys']),
+                        ),
+                    ];
                 }
             }
 
@@ -187,8 +196,9 @@ final readonly class CatalogueCompatibility
                 continue;
             }
 
-            foreach ($audit->missing as $step) {
-                $problems[] = $canonicalChanged
+            $problems = [
+                ...$problems,
+                ...array_map(static fn (int $step): string => $canonicalChanged
                     ? sprintf(
                         'alias %s requires an upcaster for the step v%d to v%d under the current canonical alias — moving an alias must preserve its entire upcaster chain',
                         $label,
@@ -202,17 +212,14 @@ final readonly class CatalogueCompatibility
                         $is,
                         $step,
                         $step + 1,
-                    );
-            }
-
-            foreach ($audit->duplicated as $step) {
-                $problems[] = sprintf(
+                    ), $audit->missing),
+                ...array_map(static fn (int $step): string => sprintf(
                     'alias %s: more than one upcaster claims the step v%d to v%d — the migration would depend on discovery order',
                     $label,
                     $step,
                     $step + 1,
-                );
-            }
+                ), $audit->duplicated),
+            ];
         }
 
         return $problems;
@@ -226,26 +233,33 @@ final readonly class CatalogueCompatibility
      */
     public function currentPersonalMismatches(array $current): array
     {
-        $problems = [];
-        foreach ($current as $alias => $entry) {
-            $declared = $entry['personal'] ?? null;
-            $runtime = $this->personalData[$entry['class']] ?? null;
-            if ($declared === null && $runtime === null) {
-                continue;
-            }
-            if ($declared !== null && $runtime !== null) {
-                $declaredKeys = $declared['keys'];
-                $runtimeKeys = $runtime['keys'];
-                sort($declaredKeys);
-                sort($runtimeKeys);
-                if ($declared['subject'] === $runtime['subject'] && $declaredKeys === $runtimeKeys) {
-                    continue;
-                }
-            }
-            $problems[] = sprintf('alias "%s" does not match the current runtime personal declaration; the message contract was not judged', $alias);
+        $mismatched = array_filter($current, fn (array $entry): bool => ! $this->matchesRuntime($entry)) |> array_keys(...);
+
+        return array_map(
+            static fn (int|string $alias): string => sprintf('alias "%s" does not match the current runtime personal declaration; the message contract was not judged', $alias),
+            $mismatched,
+        );
+    }
+
+    /**
+     * Whether an entry's personal declaration agrees with the running container, both absent counting as agreement.
+     *
+     * @param  array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}  $entry
+     */
+    private function matchesRuntime(array $entry): bool
+    {
+        $declared = $entry['personal'] ?? null;
+        $runtime = $this->personalData[$entry['class']] ?? null;
+        if ($declared === null || $runtime === null) {
+            return $declared === $runtime;
         }
 
-        return $problems;
+        $declaredKeys = $declared['keys'];
+        $runtimeKeys = $runtime['keys'];
+        sort($declaredKeys);
+        sort($runtimeKeys);
+
+        return $declared['subject'] === $runtime['subject'] && $declaredKeys === $runtimeKeys;
     }
 
     /**
@@ -261,18 +275,15 @@ final readonly class CatalogueCompatibility
      */
     private function unresolvable(array $baseline, array $current): array
     {
-        $lost = array_diff(self::resolvable($baseline), self::resolvable($current));
+        $lost = array_diff(self::resolvable($baseline), self::resolvable($current)) |> array_values(...);
 
-        $problems = [];
-
-        foreach ($lost as $alias) {
-            $problems[] = sprintf(
+        return array_map(
+            static fn (int|string $alias): string => sprintf(
                 'alias "%s" no longer resolves to any declared event — rows already stored under it become unreadable; keep it as a `replaces` entry if the rename is deliberate',
                 $alias,
-            );
-        }
-
-        return $problems;
+            ),
+            $lost,
+        );
     }
 
     /**
@@ -283,12 +294,6 @@ final readonly class CatalogueCompatibility
      */
     private static function resolvable(array $catalogue): array
     {
-        $aliases = array_keys($catalogue);
-
-        foreach ($catalogue as $entry) {
-            $aliases = [...$aliases, ...$entry['replaces']];
-        }
-
-        return $aliases;
+        return array_merge(array_keys($catalogue), ...array_column($catalogue, 'replaces'));
     }
 }

@@ -15,7 +15,8 @@ use Storm\Chronicler\Console\OutboxFailedCommand;
  * dead-letter SQL so the {@see OutboxFailedCommand} stays pure presentation. This is the operator
  * path, off the hot relay loop, a separate seam from {@see DbalOutboxWriter}, which only ever appends.
  *
- * Every operation is optionally scoped to a single row id; with no id it acts on the whole dead-letter.
+ * The page methods bound collective inspection and recovery. The id-based methods act on the whole
+ * dead-letter when passed `null`.
  */
 final readonly class OutboxDeadLetter
 {
@@ -37,7 +38,7 @@ final readonly class OutboxDeadLetter
 
         /** @var list<array{id: int|string, position: int|string, type: string, attempts: int|string, last_error: ?string, failed_at: ?string}> $rows */
         $rows = $this->connection->fetchAllAssociative(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT id, position, type, attempts, last_error, failed_at FROM es_outbox '.$where.' ORDER BY id',
             $params,
             $types,
@@ -64,7 +65,7 @@ final readonly class OutboxDeadLetter
     {
         /** @var list<array{id: int|string, position: int|string, type: string, attempts: int|string, last_error: ?string, failed_at: ?string}> $rows */
         $rows = $this->connection->fetchAllAssociative(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             "SELECT id, position, type, attempts, last_error, failed_at FROM es_outbox WHERE status = 'failed' AND id > :after ORDER BY id LIMIT :limit",
             ['after' => $afterId, 'limit' => $limit],
             ['after' => ParameterType::INTEGER, 'limit' => ParameterType::INTEGER],
@@ -86,12 +87,53 @@ final readonly class OutboxDeadLetter
         [$where, $params, $types] = $this->scope($id);
 
         return (int) $this->connection->executeStatement(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             "UPDATE es_outbox SET status = 'pending', attempts = 0, last_error = NULL, "
             .'next_attempt_at = NULL, failed_at = NULL '.$where,
             $params,
             $types,
         );
+    }
+
+    /**
+     * Requeue one ordered page, waiting for candidate locks and rechecking the failed status.
+     *
+     * Returns only changed ids, in unspecified order. The limit bounds changed rows and result size,
+     * not the scan cost of a rare type or the lock wait. Locks remain held until the caller commits
+     * when a transaction is already open. A rollback also rolls back this page.
+     *
+     * @param  non-negative-int  $afterId
+     * @param  positive-int  $limit
+     * @param  non-empty-string|null  $type  exact event alias, or every type when null
+     * @return list<int>
+     *
+     * @throws Exception on a DBAL update failure
+     */
+    public function requeuePage(int $afterId, int $limit, ?string $type = null): array
+    {
+        $params = ['after' => $afterId, 'limit' => $limit];
+        $types = ['after' => ParameterType::INTEGER, 'limit' => ParameterType::INTEGER];
+        $filter = '';
+        if ($type !== null) {
+            $filter = ' AND type = :type';
+            $params['type'] = $type;
+            $types['type'] = ParameterType::STRING;
+        }
+
+        /* language=PostgreSQL */
+        $sql = "WITH page AS (
+                    SELECT id FROM es_outbox
+                    WHERE status = 'failed' AND id > :after".$filter."
+                    ORDER BY id LIMIT :limit FOR UPDATE
+                )
+                UPDATE es_outbox AS target
+                SET status = 'pending', attempts = 0, last_error = NULL,
+                    next_attempt_at = NULL, failed_at = NULL
+                FROM page
+                WHERE target.id = page.id AND target.status = 'failed'
+                RETURNING target.id";
+
+        return array_map(intval(...), $this->connection->fetchFirstColumn($sql, $params, $types));
     }
 
     /**
@@ -106,7 +148,7 @@ final readonly class OutboxDeadLetter
         [$where, $params, $types] = $this->scope($id);
 
         return (int) $this->connection->fetchOne(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'SELECT count(*) FROM es_outbox '.$where,
             $params,
             $types,
@@ -125,7 +167,7 @@ final readonly class OutboxDeadLetter
         [$where, $params, $types] = $this->scope($id);
 
         return (int) $this->connection->executeStatement(
-            /** @lang PostgreSQL */
+            /* language=PostgreSQL */
             'DELETE FROM es_outbox '.$where,
             $params,
             $types,
