@@ -12,6 +12,7 @@
         "chronhub/storm-serializer": "self.version",
         "chronhub/storm-stream": "self.version",
         "chronhub/storm-support": "self.version",
+        "chronhub/storm-text": "self.version",
         "doctrine/dbal": "^4.0",
         "psr/log": "^3.0",
         "symfony/console": "^8.1",

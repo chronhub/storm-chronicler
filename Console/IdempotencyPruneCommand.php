@@ -12,8 +12,10 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 /**
- * Removes expired request identity claims in bounded batches. Expiration already permits
- * a new generation, so purging only reclaims storage and never shortens a live retry window.
+ * Removes expired request identity claims in bounded batches.
+ *
+ * Expiration already permits a new generation, so purging only reclaims storage and never shortens a
+ * live retry window.
  *
  * Examples:
  *

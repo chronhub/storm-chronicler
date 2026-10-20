@@ -16,14 +16,16 @@ use function strlen;
 use function substr;
 
 /**
- * The binary form a message id takes in `es_inbox`, so a proof of consumption costs 16 or 32 bytes
- * of key rather than the 36 to 69 characters of its text.
+ * The binary form a message id takes in `es_inbox`.
  *
- * Three input shapes use two binary lengths:
+ * A proof of consumption then costs 16 or 32 bytes of key rather than the 36 to 69 characters of its
+ * text. Three input shapes use two binary lengths:
  *
  * - An rfc4122 uuid, the id every enriched message carries, becomes its 16 bytes
+ *
  * - An `idem-` id, a sha256 in hex that the API derives from an `Idempotency-Key`, becomes the 32
  *   bytes of that hash
+ *
  * - Any other text becomes the 32 bytes of its own sha256
  *
  * The two 32-byte shapes share a key domain: text whose sha256 equals an `idem-` digest produces
@@ -34,19 +36,19 @@ final readonly class InboxKey
 {
     private const string IDEMPOTENT_PREFIX = 'idem-';
 
-    // No `new InboxKey(...)` call site exists anywhere in src/ or tests/: the class is a static-only
-    // encoder, read through v7Floor() and encode(). This constructor exists solely to block
-    // instantiation, so it is unreachable except through Reflection, which would assert nothing
-    // about behavior.
+    // nothing in src/ or tests/ instantiates the class, a static encoder read through `v7Floor()` and
+    // `encode()`: this constructor blocks instantiation and is unreachable except through reflection,
+    // which would assert nothing about behavior
     // @codeCoverageIgnoreStart
     private function __construct() {}
 
     // @codeCoverageIgnoreEnd
 
     /**
-     * The smallest v7 key of a given instant: its 48 bits of unix milliseconds, then zeros. Every v7
-     * key minted before that instant sorts below it, so a retention bound is a range on the primary
-     * index rather than a predicate on every row.
+     * The smallest v7 key of a given instant: its 48 bits of unix milliseconds, then zeros.
+     *
+     * Every v7 key minted before that instant sorts below it, so a retention bound is a range on the
+     * primary index rather than a predicate on every row.
      *
      * @throws InvalidArgumentException when the instant is outside unsigned 48-bit milliseconds
      */
@@ -57,7 +59,7 @@ final readonly class InboxKey
         }
 
         // the eight packed bytes leave six past the offset, so a longer length reads the same six: an
-        // equivalent mutant, left unignored on purpose, the offset and the padding here being killed
+        // equivalent mutant, left without an ignore since the offset and the padding here are killed
         return substr(pack('J', $unixMilliseconds), 2, 6).str_repeat("\0", 10);
     }
 

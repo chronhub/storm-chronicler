@@ -10,16 +10,16 @@ use Storm\Chronicler\Outbox\OutboxRelay;
 /**
  * Raw PostgreSQL DDL for `es_outbox_archive`, the delivery audit of the transactional outbox.
  *
- * Where a row goes once it has been published, when `storm.outbox.disposal` says archive rather than
- * delete. Append-only with zero updates, so neither churn nor bloat; `archived_at` is the publication
- * instant, the move happening inside the drain transaction that published.
+ * A published row moves here when `storm.outbox.disposal` says archive rather than delete. The table is
+ * append-only with zero updates, so neither churn nor bloat; `archived_at` is the publication instant,
+ * the move happening inside the drain transaction that published.
  *
- * Retention belongs to `storm:outbox:prune`, which sweeps by age. A BRIN on `archived_at` keeps that
+ * Retention belongs to `storm:outbox:prune`, which sweeps by age; a BRIN on `archived_at` keeps that
  * sweep cheap on a table this insert-ordered.
  *
- * The table is OPTIONAL in a way `es_outbox` is not, since a store running the delete disposal never
- * writes a row here. It is installed unconditionally all the same: the disposal is runtime config,
- * and an archive table missing at the moment that config flips would fail a drain rather than a boot.
+ * The table is optional in a way `es_outbox` is not, since a store running the delete disposal never
+ * writes a row here. It is installed unconditionally all the same: the disposal is runtime config, and
+ * an archive table missing at the moment that config flips would fail a drain rather than a boot.
  *
  * @see OutboxSchema the hot table it drains from
  * @see OutboxRelay

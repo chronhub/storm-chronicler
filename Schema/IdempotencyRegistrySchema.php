@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Schema;
 
 /**
- * Request identity claims on the events connection. Expiration is fixed at acquisition;
- * changing the configured lifetime never extends an existing claim.
+ * Request identity claims on the events connection.
+ *
+ * Expiration is fixed at acquisition; changing the configured lifetime never extends an existing claim.
  */
 final class IdempotencyRegistrySchema
 {

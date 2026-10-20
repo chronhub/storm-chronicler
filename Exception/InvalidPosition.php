@@ -9,12 +9,14 @@ use Storm\Contracts\Chronicler\InvalidPosition as InvalidPositionContract;
 use Storm\Contracts\Chronicler\Position;
 
 /**
- * A value the store cannot accept as a position: not the base-10 form of a positive integer, or a
- * comparison across two different Position implementations.
+ * The store's refusal of a malformed or foreign position.
  *
- * Implements the contracted InvalidPositionContract on an SPL `InvalidArgumentException`, so ports
- * never surface a concrete. Both forms are caller errors refused at the boundary, never carried on
- * as a value object that looks valid until some later read explodes far from the bug.
+ * A malformed position is not the base-10 form of a positive integer; a foreign one is a different
+ * `Position` implementation in a comparison. Both are caller errors, refused at the boundary and never
+ * carried on as a value object that looks valid until a later read fails far from the bug.
+ *
+ * The contracted `InvalidPositionContract` sits on an SPL `InvalidArgumentException`, so ports never
+ * surface a concrete type.
  */
 final class InvalidPosition extends InvalidArgumentException implements InvalidPositionContract
 {

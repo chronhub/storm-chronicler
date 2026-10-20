@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Outbox;
 
 /**
- * Writes outbox rows for just-appended events, within the append transaction so they are atomic with
- * the events. The default impl runs on its own injected connection, the shared one, so when the event
+ * Writes outbox rows for just-appended events, atomically with them inside the append transaction.
+ *
+ * The default implementation runs on its own injected connection, the shared one, so when the event
  * store calls it inside `transactional()` the rows commit with the events. Disable the outbox by
- * aliasing to NullOutboxWriter.
+ * aliasing to `NullOutboxWriter`.
  */
 interface OutboxWriter
 {

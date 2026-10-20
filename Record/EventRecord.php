@@ -11,13 +11,14 @@ use Storm\Contracts\Message\DomainEvent;
 use Storm\Message\Message;
 
 /**
- * A single stored event read back from the event store: the neutral Message envelope, header bag
- * and the deserialized domain object, plus its assigned Position and the DB-generated
- * `recorded_at`.
+ * A stored event read back from the event store.
  *
- * A plain data carrier, yielded on read, never built by hand in the domain. Per-event metadata
- * such as aggregate version, type, and stream lives in the Message header, not as separate fields
- * here: the header bag is the extension point.
+ * It carries the neutral `Message` envelope, with its header bag and the deserialized domain object,
+ * plus the assigned `Position` and the database-generated `recorded_at`. A plain data carrier, yielded
+ * on read and never built by hand in the domain.
+ *
+ * Per-event metadata such as the aggregate version, the type and the stream lives in the message
+ * header rather than in separate fields: the header bag is the extension point.
  */
 final readonly class EventRecord
 {
@@ -26,10 +27,11 @@ final readonly class EventRecord
         public Position $position,
         public PointInTime $recordedAt,
         /**
-         * The stored payload AS WRITTEN, pre-upcast, personal keys still ciphered. A reference to
-         * the already-decoded row content, so it costs one array slot, never a copy; the fold path
-         * ignores it. It exists for the inspection surfaces: `PersonalDataVeil` renders personal
-         * keys from HERE, as stored, instead of the rebuilt event's decrypted `toPayload()`.
+         * The stored payload as written: pre-upcast, personal keys still ciphered.
+         *
+         * It references the already-decoded row content, so it costs one array slot and never a copy,
+         * and the fold path ignores it. It serves the inspection surfaces: `PersonalDataVeil` renders
+         * personal keys from this stored form instead of the rebuilt event's decrypted `toPayload()`.
          *
          * @var array<string, mixed>
          */
@@ -37,10 +39,12 @@ final readonly class EventRecord
     ) {}
 
     /**
-     * The stored domain event. A record only ever comes from reading the event store, which stores
-     * domain events exclusively, so the envelope always wraps a DomainEvent.
+     * The stored domain event.
      *
-     * @throws NotADomainEvent when the envelope wraps a non-event, a corrupt read or a misuse
+     * A record only ever comes from reading the event store, which stores domain events exclusively,
+     * so the envelope always wraps a `DomainEvent`.
+     *
+     * @throws NotADomainEvent when the envelope wraps a non-event, after a corrupt read or a misuse
      */
     public function event(): DomainEvent
     {

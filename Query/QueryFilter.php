@@ -10,27 +10,25 @@ use Storm\Chronicler\Schema\EventStoreSchema;
 use Storm\Chronicler\Store\StreamReader;
 
 /**
- * A read strategy for StreamReader::retrieveByFilter(): it shapes the query that selects stored
- * events.
+ * A read strategy for `StreamReader::retrieveByFilter()`, shaping the query that selects stored events.
  *
- * The store owns the SELECT columns and FROM, `event_store` aliased `e`, and the row-to-EventRecord
- * mapping; a filter only narrows and orders the rows. It adds WHERE, ORDER BY, and LIMIT against the
- * `e` alias over any `event_store` column, whose source of truth is Schema\EventStoreSchema, and
- * must order by `e.sequence_no` for catch-up reads, the global append position the projector
- * checkpoints on. Keeping the SELECT shape out of the filter's reach means a filter can never break
- * a projection by selecting the wrong columns.
+ * The store owns the `SELECT` columns and the `FROM`, `event_store` aliased `e`, and the mapping of a
+ * row to an `EventRecord`; a filter only narrows and orders the rows. It adds `WHERE`, `ORDER BY` and
+ * `LIMIT` against the `e` alias over any `event_store` column, whose source of truth is
+ * `EventStoreSchema`, and must order by `e.sequence_no` for catch-up reads, the global append position
+ * the projector checkpoints on. Keeping the `SELECT` shape out of the filter's reach means a filter can
+ * never break a projection by selecting the wrong columns.
  *
- * Lives in the package, not Contracts: it names a concrete external type, Doctrine's QueryBuilder,
- * like StreamReader itself.
+ * It lives in the package rather than in Contracts because it names a concrete external type,
+ * Doctrine's `QueryBuilder`, like `StreamReader` itself.
  *
- * Joins are allowed. A filter MAY add a JOIN. This is deliberate, since filters are trusted
- * framework code, and it is the one place a filter reaches past the single `event_store` table; the
- * module OWNING the joined schema ships such a filter, never this one. Two constraints keep the
- * store contract honest:
+ * A filter may add a `JOIN`, since filters are trusted framework code: it is the one place a filter
+ * reaches past the single `event_store` table, and the module owning the joined schema ships such a
+ * filter, never this one. Two constraints keep the store contract honest:
  *
  * - Join only bookkeeping owned by a Storm module, never arbitrary domain or read-model tables.
  *
- * - The SELECT stays `e.*`, the store's columns; a join narrows the rows, it never adds columns to
+ * - The `SELECT` stays `e.*`, the store's columns: a join narrows the rows and never adds columns to
  *   the result.
  *
  * @see EventRecord

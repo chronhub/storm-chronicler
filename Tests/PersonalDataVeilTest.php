@@ -21,9 +21,10 @@ use Storm\Serializer\CipheringMessageSerializer;
 use Storm\Serializer\DefaultMessageSerializer;
 
 /**
- * The no-decrypt rule of the inspection surfaces: personal keys render AS STORED, the envelope or a
- * pre-marking row's cleartext, never the rebuilt event's decrypted values; business keys keep the
- * hydrated current view.
+ * The no-decrypt rule of the inspection surfaces.
+ *
+ * Personal keys render as stored, the envelope or a pre-marking row's cleartext, never the rebuilt
+ * event's decrypted values; business keys keep the hydrated current view.
  */
 final class PersonalDataVeilTest extends TestCase
 {
@@ -82,7 +83,7 @@ final class PersonalDataVeilTest extends TestCase
     {
         $record = $this->record($this->cipheredData());
 
-        // empty map = the unmarked-app default: pure pass-through of toPayload()
+        // an empty map is the unmarked-app default: a pure pass-through of `toPayload()`
         $veiled = new PersonalDataVeil()->veil($record);
 
         $this->assertSame('Ada Lovelace', $veiled['full_name']);
@@ -91,7 +92,7 @@ final class PersonalDataVeilTest extends TestCase
     #[Test]
     public function a_pre_marking_cleartext_row_shows_its_stored_cleartext(): void
     {
-        // read-without-decrypting shows what the store HOLDS: for a row written before the class
+        // read-without-decrypting shows what the store holds: for a row written before the class
         // was marked, that is honest cleartext; protecting it is the forget's job, not the veil's
         $stored = ['customer_id' => 'cus-1', 'full_name' => 'Ada Lovelace', 'channel' => 'web'];
         $message = Message::fromStored(
@@ -132,8 +133,10 @@ final class PersonalDataVeilTest extends TestCase
     }
 
     /**
-     * An EventRecord as the read path builds it: the message rebuilt through the DECORATED
-     * serializer, so cleartext in the object, and the stored content as written, so envelopes.
+     * An `EventRecord` as the read path builds it.
+     *
+     * The message is rebuilt through the decorated serializer, so the object holds cleartext, and the
+     * stored content stays as written, so it holds envelopes.
      *
      * @param  array{header: array<string, mixed>, content: array<string, mixed>}  $data
      * @param  array<string, mixed>|null  $storedContent
@@ -185,7 +188,11 @@ final class PersonalDataVeilTest extends TestCase
     }
 
     /**
-     * @return array<class-string, array{subject: string, keys: list<string>, fallbacks: array<string, scalar|null>}>
+     * @return array<class-string, array{
+     *     subject: string,
+     *     keys: list<string>,
+     *     fallbacks: array<string, scalar|null>,
+     * }>
      */
     private function map(): array
     {

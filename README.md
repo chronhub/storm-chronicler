@@ -101,11 +101,14 @@ snapshot first. Projections do not un-project: reset them yourself.
 
 ## DDL, partitioning, install
 
-Six tables shipped as versioned schema classes: `event_store` (partitioned LIST by category +
-`_default`), `stream_heads`, `event_store_high_water`, `es_outbox`, `es_outbox_archive`,
-`es_inbox`. `storm:install` aggregates them with the other packages' schemas: it runs in a
+Nine tables, shipped by seven versioned schema classes: `event_store` (partitioned LIST by
+category + `_default`), `stream_heads`, `event_store_high_water`, `es_idempotency`, `es_outbox` with
+its `es_outbox_relay` and `es_outbox_archive`, and `es_inbox` with its `es_inbox_consumers`.
+`storm:install` aggregates them with the other packages' schemas: it runs in a
 transaction under an advisory lock, verifies schema conformance instead of trusting `IF NOT
-EXISTS`, and its destructive faces (`--drop`, `--reset`) ask unless `--force`.
+EXISTS`, and its destructive faces (`--drop`, `--reset`) ask unless `--force`. The verification also
+reads what the database carries beyond the catalog: a column, a constraint or a unique index no
+catalog names fails the install as undeclared, an ordinary index never does.
 
 Partition EARLY: PostgreSQL refuses to split a DEFAULT partition that already holds the category —
 `storm:event-store:partition` guards the volume and prints the manual recipe instead. Operator

@@ -14,15 +14,17 @@ use Throwable;
 use Traversable;
 
 /**
- * Applies the registered Upcasters to bring a stored payload from its `event_version` up to the
- * type's current version, one step at a time, keyed on the canonical alias.
+ * Brings a stored payload from its `event_version` up to the type's current version.
  *
- * Runs at the read boundary, `fromRow`, the outbox relay, and the neutral decoder, before the
- * event is rebuilt from the payload, so the deserializer always sees a current-version payload. A
- * version step with no upcaster is a fail-fast MissingUpcaster; a bump needs its upcaster. Two
- * upcasters on one step is the mirror error, and just as loud, a DuplicateUpcaster: the invariant is
- * ONE step = ONE upcaster, and an immutable history cannot have its migration decided by the order
- * services happen to be discovered in.
+ * The registered upcasters apply one step at a time, keyed on the canonical alias. The chain runs at
+ * the read boundary, `fromRow()`, the outbox relay and the neutral decoder, before the event is rebuilt
+ * from the payload, so the deserializer always sees a current-version payload.
+ *
+ * - A version step with no upcaster fails fast with `MissingUpcaster`: a bump needs its upcaster.
+ *
+ * - Two upcasters on one step is the mirror error, just as loud, a `DuplicateUpcaster`: each step has
+ *   exactly one upcaster, and an immutable history cannot have its migration decided by the order in
+ *   which services happen to be discovered.
  */
 final readonly class UpcasterChain
 {
@@ -42,14 +44,15 @@ final readonly class UpcasterChain
     }
 
     /**
-     * Statically audits the steps `[$fromVersion, $toVersion)` of one alias: which have no claiming
-     * upcaster and which have more than one; the two ways `upcast()` fails loud at read, answered
-     * BEFORE any row is read. Pure `supports()` polling, no payload touched: the deploy-time half
-     * of the same invariant, consumed by the upcaster conformance.
+     * Statically audits the steps `[$fromVersion, $toVersion)` of one alias, before any row is read.
      *
-     * A missing or duplicated step is REPORTED here, never thrown: reporting is the whole point, and
-     * a verdict that stopped at the first bad step would name one of the problems an operator is
-     * about to fix in one deployment. Only the probe itself can end the audit.
+     * It finds the steps no upcaster claims and those more than one claims, the two ways `upcast()`
+     * fails loud at read. It only polls `supports()` and touches no payload: the deploy-time half of the
+     * same invariant, consumed by the upcaster conformance.
+     *
+     * A missing or duplicated step is reported, never thrown: a verdict that stopped at the first bad
+     * step would name only one of the problems an operator is about to fix in one deployment. Only the
+     * probe itself can end the audit.
      *
      * @throws UndecodableRow when an upcaster's own `supports()` threw, so the chain cannot say what
      *                        it owns; `resolvableByAnotherRuntime()` is true, a corrected deployment
@@ -92,8 +95,8 @@ final readonly class UpcasterChain
     public function upcast(string $alias, int $fromVersion, int $toVersion, array $payload): array
     {
         if ($fromVersion > $toVersion) {
-            // the mirror asymmetry would be silent: the loop below is loud on the PAST, a missing
-            // upcaster throws, but zero-iterates on the FUTURE; a downgrade must be as loud
+            // the mirror asymmetry would be silent: the loop below is loud on the past, a missing
+            // upcaster throws, but zero-iterates on the future; a downgrade must be as loud
             throw UnsupportedFutureEventVersion::forEvent($alias, $fromVersion, $toVersion);
         }
 
@@ -145,12 +148,10 @@ final readonly class UpcasterChain
             return $claimants[0]->upcast($payload);
         } catch (Throwable $e) {
             // A user upcaster's own failure, a TypeError on a payload shaped otherwise than it
-            // assumed or a failed assertion, must not escape raw: raw, it is indistinguishable
-            // from an infrastructure crash, so the outbox relay would roll back its whole batch
-            // and crash-loop the daemon over one row. Typed, it joins the other decode faults of
-            // this chain, the same disposition: THIS binary cannot decode the row, a corrected
-            // deployment can. The wrap names the service and the step, which the underlying
-            // "undefined array key" never does.
+            // assumed or a failed assertion, must not escape raw: it would read as an infrastructure
+            // crash, and the outbox relay would roll back its whole batch and crash-loop the daemon
+            // over one row. Typed, it joins the chain's other decode faults and their disposition,
+            // and the wrap names the service and the step, which "undefined array key" never does.
             throw UpcasterFailed::forStep($alias, $fromVersion, $claimants[0]::class, $e);
         }
     }

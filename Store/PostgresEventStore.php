@@ -39,20 +39,25 @@ use Storm\Stream\StreamName;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
- * PostgreSQL event store on Doctrine DBAL, a pure store: it does NOT open a transaction, so it can
- * run raw for migrations, copy, or dump. Atomicity of an append, the OCC CAS, the events, the head
- * position, and the outbox, is provided by the DbalTransactionalEventStore decorator wrapping each
- * append in one transaction; the collaborators StreamHeadStore and OutboxWriter only run
- * statements on the shared connection. `appendTo` is CAS-first, failing fast before inserting, with
+ * The PostgreSQL event store on Doctrine DBAL, a pure store that opens no transaction.
+ *
+ * It can therefore run raw for migrations, copy or dump. The `DbalTransactionalEventStore` decorator
+ * makes an append atomic, the OCC CAS, the events, the head position and the outbox, by wrapping it in
+ * one transaction; the collaborators `StreamHeadStore` and `OutboxWriter` only run statements on the
+ * shared connection. `appendTo()` is CAS-first, failing fast before inserting, with
  * `UNIQUE (category, stream, version)` as a backstop. Reads stream rows as a lazy cursor.
  *
- * The one concrete behind the three ports. The writer aliases live on the DECORATED id:
- * `DecisionAppend` is aliased here and decorated by the chain, Transactional then Retry, and
- * `FactAppend` aliases `DecisionAppend` in `config/services.php` so both writer ports resolve to
- * the whole chain. `StreamReader` alone stays on this raw store; reads bypass the writer decorators
- * by design, with nothing to transact and nothing to retry.
+ * It is the one concrete behind the three ports, and the writer aliases live on the decorated id:
  *
- * @see \Storm\Chronicler\Store\DbalTransactionalEventStore
+ * - `DecisionAppend` is aliased here and decorated by the chain, transactional then retry.
+ *
+ * - `FactAppend` aliases `DecisionAppend` in `config/services.php`, so both writer ports resolve to the
+ *   whole chain.
+ *
+ * - `StreamReader` alone stays on this raw store: reads bypass the writer decorators, with nothing to
+ *   transact and nothing to retry.
+ *
+ * @see DbalTransactionalEventStore
  */
 #[AsAlias(StreamReader::class)]
 #[AsAlias(DecisionAppend::class)]
@@ -64,11 +69,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         private StreamHeadStore $streamHeads,
         private OutboxWriter $outbox,
         private EventStoreObservability $obs,
-        /**
-         * Autowired in prod; null means it is lazily built from the connection for manual
-         * construction in tests.
-         */
-        private ?SafeHeadAdvancer $safeHeadAdvancer = null,
+        private SafeHeadAdvancer $safeHeadAdvancer,
     ) {}
 
     /**
@@ -77,7 +78,8 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
      * @throws IncoherentDecisionVersions when the batch's claimed versions are not exactly
      *                                    `expectedVersion + 1 .. expectedVersion + N`; refused before
      *                                    the head moves, nothing written
-     * @throws StaleVersion when the CAS on the stream head loses because the stream moved past `$expectedVersion`
+     * @throws StaleVersion when the CAS on the stream head loses because the stream moved past
+     *                      `$expectedVersion`
      * @throws DuplicateVersion when the `UNIQUE (category, stream, version)` backstop fires on a true race
      * @throws Exception on a DBAL failure of the insert or outbox write
      */
@@ -96,22 +98,22 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         $name = $streamName->toString();
         $newVersion = $expectedVersion + count($messages);
 
-        // The write-side mirror of the repository's read-side continuity guard: the store persists the
-        // versions the producer CLAIMS, since toRow reads Header::AggregateVersion verbatim, while the head
-        // moves by arithmetic. So a batch whose claims are not exactly expected+1..expected+N must be
-        // refused BEFORE the head moves, or stream_heads and the durable rows divorce and the next OCC
-        // base is corrupt. N int comparisons on a path dominated by json_encode.
+        // the write-side mirror of the repository's read-side continuity guard: the store persists the
+        // versions the producer claims, since `toRow()` reads `Header::AggregateVersion` verbatim, while
+        // the head moves by arithmetic. A batch claiming other than expected+1..expected+N must be
+        // refused before the head moves, or `stream_heads` and the durable rows disagree and the next
+        // OCC base is corrupt; the check costs N int comparisons on a path dominated by `json_encode`.
         $at = array_find_key($messages, static fn (Message $message, int $i): bool => $message->aggregateVersion() !== $expectedVersion + $i + 1);
 
         if ($at !== null) {
             throw IncoherentDecisionVersions::forStream($name, $expectedVersion + $at + 1, $messages[$at]->aggregateVersion() ?? 'null', $at);
         }
 
-        // The CAS head: fail fast before inserting. StreamHeadStore wraps every DBAL failure into
-        // StorageFailure at its own boundary, so nothing here can reach persist()'s UNIQUE catch.
+        // The CAS head: fail fast before inserting. `StreamHeadStore` wraps every DBAL failure into
+        // `StorageFailure` at its own boundary, so nothing here can reach the `UNIQUE` catch of `persist()`.
         if (! $this->streamHeads->advance($name, $expectedVersion, $newVersion)) {
             $actual = $this->streamHeads->lastVersion($name);
-            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category, $expectedVersion, $actual, 'stale'));
+            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category->value, $expectedVersion, $actual, 'stale'));
 
             throw StaleVersion::forStream($name, $expectedVersion, $actual);
         }
@@ -142,8 +144,8 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
 
         $newVersion = $this->streamHeads->bump($streamName->toString(), count($messages));
 
-        // The allocated range stamps the header, and through it the version column, since toRow
-        // reads aggregateVersion(); a fact's position is decided here, never by the producer.
+        // The allocated range stamps the header, and through it the version column, since `toRow()`
+        // reads `aggregateVersion()`; a fact's position is decided here, never by the producer.
         $messages = array_map(
             static fn (Message $message, int $version): Message => $message->withHeader(Header::AggregateVersion, $version),
             $messages,
@@ -164,13 +166,13 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
             ->select('sequence_no', 'stream', 'type', 'event_version', 'header', 'content', 'recorded_at')
             ->from('event_store')
             ->where('category = :category')
-            ->setParameter('category', $streamName->category);
+            ->setParameter('category', $streamName->category->value);
 
         if ($streamName->qualifier !== null) {
-            // ONE stream: order by `version`, identical order to `sequence_no` within a stream, since the
-            // CAS serializes its appends, but the UNIQUE (category, stream, version) index PROVIDES
-            // it, so the hottest read, aggregate rehydration, skips the Sort node a `sequence_no`
-            // order would force. The same reasoning drives AggregateStreamSince.
+            // one stream: `version` gives the same order as `sequence_no` within a stream, since the CAS
+            // serializes its appends, and the `UNIQUE (category, stream, version)` index provides it,
+            // so the hottest read, aggregate rehydration, skips the Sort node a `sequence_no` order
+            // would force; `AggregateStreamSince` follows the same reasoning
             $query->andWhere('stream = :stream')
                 ->orderBy('version', $direction->value)
                 ->setParameter('stream', $streamName->toString());
@@ -182,7 +184,7 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         return $this->cursor(
             $query,
             source: 'retrieveAll',
-            target: $streamName->qualifier !== null ? $streamName->toString() : 'category:'.$streamName->category,
+            target: $streamName->qualifier !== null ? $streamName->toString() : 'category:'.$streamName->category->value,
         );
     }
 
@@ -226,19 +228,20 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
      */
     public function safeHeadPosition(): ?Position
     {
-        return ($this->safeHeadAdvancer ?? new SafeHeadAdvancer($this->connection))->compute();
+        return $this->safeHeadAdvancer->compute();
     }
 
     /**
-     * The shared tail of both append verbs: insert and outbox, the `UNIQUE (category, stream, version)`
-     * backstop, and the append telemetry. The version-resolution heads stay in the public verbs; that
-     * difference is the contract, this tail is the mechanism.
+     * The shared tail of both append verbs, the mechanism under their two version contracts.
+     *
+     * It runs the insert and the outbox write, the `UNIQUE (category, stream, version)` backstop and
+     * the append telemetry; resolving the versions stays in the public verbs.
      *
      * @param  list<Message>  $messages
      * @param  int  $occExpected  the head this writer expected, reported on a duplicate
      * @param  float  $start  the verb's entry time, so the append telemetry covers the whole write
      *
-     * @throws DuplicateVersion when the UNIQUE backstop fires; a true race on `appendTo`, or on the
+     * @throws DuplicateVersion when the `UNIQUE` backstop fires; a true race on `appendTo`, or on the
      *                          fact path only reachable when a stream mixes the CAS and fact verbs
      * @throws Exception on a DBAL failure of the insert or outbox write
      * @throws SerializationException when a message is not a serializable payload
@@ -250,25 +253,25 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         try {
             $entries = $this->insertEvents($streamName, $messages);
         } catch (UniqueConstraintViolationException) {
-            // No lastVersion() read here: the UNIQUE violation ABORTED the surrounding transaction,
-            // 25P02, so any further query would explode into a StorageFailure masking this throw.
-            // The head this writer moved to $newVersion goes back with the abort, so the head that
-            // stands is the expected one; that is what the conflict reports.
-            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category, $occExpected, $occExpected, 'duplicate'));
+            // No `lastVersion()` read here: the `UNIQUE` violation aborted the surrounding transaction,
+            // 25P02, so any further query would fail as a `StorageFailure` masking this throw. The
+            // head this writer moved to $newVersion goes back with the abort, so the head that stands
+            // is the expected one; that is what the conflict reports.
+            $this->obs->recordOccConflict(new OccConflictContext($name, $streamName->category->value, $occExpected, $occExpected, 'duplicate'));
 
             throw DuplicateVersion::forStream($name);
         }
 
-        // OUTSIDE the OCC catch: only the event insert's UNIQUE backstop is a duplicate stream
-        // version. The outbox write's own violation, es_outbox_pk colliding after a restore left the
-        // identity sequence behind its explicit ids, is a storage fault; classified as DuplicateVersion
-        // it would ride the terminal OCC path with the wrong diagnosis, so it escapes raw, like every
-        // DBAL failure at this source.
+        // Outside the OCC catch: only the event insert's `UNIQUE` backstop is a duplicate stream
+        // version. The outbox write's own violation, `es_outbox_pk` colliding after a restore left the
+        // identity sequence behind its explicit ids, is a storage fault; classified as
+        // `DuplicateVersion` it would take the terminal OCC path with the wrong diagnosis, so it
+        // escapes raw, like every DBAL failure at this source.
         $this->outbox->write($entries);
 
         $this->obs->recordAppend(new AppendContext(
             streamName: $name,
-            category: $streamName->category,
+            category: $streamName->category->value,
             eventCount: count($messages),
             newVersion: $newVersion,
             durationMs: (microtime(true) - $start) * 1000,
@@ -276,20 +279,20 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
     }
 
     /**
-     * The shared tail of both retrieve verbs: execute lazily, stream rows as domain events, and record
-     * the load telemetry when the consumer stops consuming. Nothing runs, not even the query, until the
-     * first iteration. The `finally` records the load on EVERY exit, so the count and duration always
-     * reflect what the consumer actually saw and an interrupted read is never silently absent from
-     * telemetry. Every exit is one of:
+     * The shared tail of both retrieve verbs, streaming rows as domain events and recording the load.
      *
-     * - Full exhaustion;
-     * - An early break, where PHP runs a suspended generator's `finally` at destruction;
-     * - A throw mid-hydration.
+     * Nothing runs, not even the query, until the first iteration. The `finally` records the load
+     * telemetry on every exit, so the count and duration always reflect what the consumer actually saw
+     * and an interrupted read is never silently absent from telemetry. Every exit is one of:
+     *
+     * - Full exhaustion
+     * - An early break, where PHP runs a suspended generator's `finally` at destruction
+     * - A throw mid-hydration
      *
      * @throws Exception on a DBAL failure of the underlying read
      * @throws InvalidPosition when a row's `sequence_no` is not a positive integer
      * @throws ClockExceptionContract when a stored point in time failed to be parsed
-     * @throws SerializationExceptionContract when a stored event type is unknown / not deserializable
+     * @throws SerializationExceptionContract when a stored event type is unknown or not deserializable
      * @throws UnknownEventType when the stored `type` resolves to no known class, or to a class
      *                          that is not a domain event
      * @throws UndecodableRow when this runtime cannot decode a stored row, a missing or duplicated
@@ -308,12 +311,12 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
         try {
             while (($row = $result->fetchAssociative()) !== false) {
                 $record = $this->persistence->fromRow($row);
-                $count++; // before the yield: a generator abandoned mid-suspension has DELIVERED this record
+                $count++; // before the yield: a generator abandoned mid-suspension has delivered this record
 
                 yield $record;
             }
         } finally {
-            // free the buffered result on EVERY exit: pdo_pgsql holds the whole set client-side,
+            // free the buffered result on every exit: pdo_pgsql holds the whole set client-side,
             // and an abandoned Generator in a long-lived worker would otherwise retain it until GC
             $result->free();
 
@@ -327,16 +330,18 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
     }
 
     /**
-     * Insert the events with ONE multi-VALUES statement per {@see InsertChunk} of rows, returning one
-     * outbox entry per event, its position and serialized row.
+     * Insert the events with one multi-`VALUES` statement per `InsertChunk` of rows.
      *
-     * `sequence_no` is engine-assigned by IDENTITY, so each row's position is read back from
+     * It returns one outbox entry per event, with its position and serialized row. `sequence_no` is
+     * assigned by the engine's `IDENTITY`, so each row's position is read back from
      * `RETURNING version, sequence_no` and matched by `version`, unique here because every row of a
-     * call shares the stream and `UNIQUE (category, stream, version)` backstops it. NEVER by RETURNING
-     * row order: the standard leaves it unspecified, and nothing contracts it on a partitioned table. A
-     * version the RETURNING did not cover is impossible on the happy path, since any failed tuple aborts
-     * the whole statement and throws; it would mean this mapping's premise broke, a bug, hence
-     * LogicException.
+     * call shares the stream and `UNIQUE (category, stream, version)` backstops it. The match never
+     * relies on the `RETURNING` row order: the standard leaves it unspecified, and nothing contracts it
+     * on a partitioned table.
+     *
+     * A version the `RETURNING` did not cover is impossible on the happy path, since any failed tuple
+     * aborts the whole statement and throws; it would mean this mapping's premise broke, a bug, hence a
+     * `LogicException`.
      *
      * @param  list<Message>  $messages
      * @return list<OutboxEntry> in message order
@@ -346,9 +351,9 @@ final readonly class PostgresEventStore implements DecisionAppend, FactAppend, S
      */
     private function insertEvents(StreamName $streamName, array $messages): array
     {
-        // Unreachable: this is private, reached only through persist(), itself private and called only by
-        // appendTo() and appendAny(), both of which return on an empty message list before getting here.
-        // No third caller exists. Kept as a defensive floor for a future one.
+        // Unreachable: `persist()`, private like this method, is its only caller, and `appendTo()` and
+        // `appendAny()`, its only callers, both return on an empty message list before getting here.
+        // The check guards a future third caller.
         // @codeCoverageIgnoreStart
         if ($messages === []) {
             return [];

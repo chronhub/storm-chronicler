@@ -16,11 +16,16 @@ use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
- * The existence port's duties at its OWN boundary, the Connection mocked: the row-probe result maps
- * to the bool, an absent row to false; a malformed category is rejected BEFORE any statement runs; and
- * a driver failure never reaches a caller as a Doctrine type, surfacing as the port-owned
- * StorageFailure with the original chained, under the operation label of the failing method. The
- * integration StreamExistenceTest proves the answers against a real store; a mock cannot.
+ * The existence port's duties at its own boundary, with the `Connection` mocked:
+ *
+ * - The row-probe result maps to the bool, an absent row to false
+ *
+ * - A malformed category is rejected before any statement runs
+ *
+ * - A driver failure never reaches a caller as a Doctrine type: it surfaces as the port-owned
+ *   `StorageFailure` with the original chained, under the operation label of the failing method
+ *
+ * The integration `StreamExistenceTest` proves the answers against a real store, which a mock cannot.
  */
 final class DbalStreamExistenceTest extends TestCase
 {
@@ -56,7 +61,8 @@ final class DbalStreamExistenceTest extends TestCase
             $this->fail('a driver failure of the probe must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause
-            $this->assertStringContainsString('the stream existence read', $e->getMessage()); // the operation label
+            // the operation label
+            $this->assertStringContainsString('the stream existence read', $e->getMessage());
             $this->assertStringContainsString('the head registry vanished mid-probe', $e->getMessage());
         }
     }
@@ -89,7 +95,8 @@ final class DbalStreamExistenceTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('order-42')); // a full stream name is NOT a category
+        // a full stream name is not a category
+        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('order-42'));
     }
 
     #[Test]
@@ -100,7 +107,8 @@ final class DbalStreamExistenceTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('9order')); // must start with a letter
+        // must start with a letter
+        new DbalStreamExistence($connection)->hasCategory(new StreamCategory('9order'));
     }
 
     #[Test]
@@ -115,7 +123,8 @@ final class DbalStreamExistenceTest extends TestCase
             $this->fail('a driver failure of the probe must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause
-            $this->assertStringContainsString('the category existence read', $e->getMessage()); // the operation label
+            // the operation label
+            $this->assertStringContainsString('the category existence read', $e->getMessage());
             $this->assertStringContainsString('the store vanished mid-probe', $e->getMessage());
         }
     }

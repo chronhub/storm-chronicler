@@ -7,24 +7,26 @@ namespace Storm\Chronicler\Inbox;
 use Throwable;
 
 /**
- * Batched consumer-side idempotency: run N handlers, each at most once per `(consumer, messageId)`,
- * inside one transaction and one COMMIT.
+ * Batched consumer-side idempotency: N handlers, each at most once per `(consumer, messageId)`.
  *
- * The throughput counterpart of the per-message `InboxStore::once()`, which is one tx per message.
- * Amortizing the per-event commit, an fsync on a durable cluster plus the WAL-record, round-trip,
- * lock release and syscall always, over N messages is the standard consume-side batching lever, as in
- * Akka `groupedWithin`, Axon `batchSize`, and Kafka `max.poll.records`. The exactly-once-effect window
- * widens from per-message to per-batch: the whole batch commits or rolls back together. At-least-once
- * still holds; a rolled-back batch is redelivered and the `ON CONFLICT` dedup re-skips the rows already
- * recorded.
+ * They run inside one transaction and one `COMMIT`. This is the throughput counterpart of the
+ * per-message `InboxStore::once()`, which takes one transaction per message. Amortizing the per-event
+ * commit over N messages is the standard consume-side batching technique, as in Akka `groupedWithin`,
+ * Axon `batchSize` and Kafka `max.poll.records`: a commit costs an fsync on a durable cluster, plus the
+ * WAL record, the round trip, the lock release and the syscall in every case.
+ *
+ * The exactly-once-effect window widens from one message to one batch: the whole batch commits or rolls
+ * back together. At-least-once still holds: a rolled-back batch is redelivered, and the `ON CONFLICT`
+ * deduplication skips again the rows already recorded.
  *
  * @see InboxStore the per-message sibling
  */
 interface BatchInboxStore
 {
     /**
-     * Record each item's `(consumer, messageId)` and run its handler, all in one transaction; a
-     * duplicate item is a no-op. The handlers run in array order.
+     * Record each item's `(consumer, messageId)` and run its handler, all in one transaction.
+     *
+     * A duplicate item is a no-op, and the handlers run in array order.
      *
      * @param  list<InboxItem>  $items
      * @return list<bool> one entry per item, in order: true if the handler ran on first delivery, false

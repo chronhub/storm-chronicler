@@ -7,10 +7,11 @@ namespace Storm\Chronicler\Exception;
 use Storm\Contracts\Chronicler\RetryableConcurrencyConflict;
 
 /**
- * The optimistic pre-check, a stream-head CAS, saw the stream past the loaded version: a
- * competing writer won between a load and append. Safe to retry; the contracted
- * RetryableConcurrencyConflict marker says so portably: reload the aggregate and reapply.
- * See ConcurrencyException for the handling rationale.
+ * The optimistic pre-check, a stream-head CAS, saw the stream past the loaded version.
+ *
+ * A competing writer won between the load and the append, so a retry is safe: the contracted
+ * `RetryableConcurrencyConflict` marker says so portably, and the caller reloads the aggregate and
+ * reapplies.
  */
 final class StaleVersion extends ConcurrencyException implements RetryableConcurrencyConflict
 {

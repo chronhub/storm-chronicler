@@ -7,7 +7,7 @@ namespace Storm\Chronicler\Outbox;
 use Storm\Message\Message;
 
 /**
- * In-memory OutboxPublisher that records what it published, for tests and local dev.
+ * In-memory `OutboxPublisher` that records what it published, for tests and local dev.
  */
 final class InMemoryOutboxPublisher implements OutboxPublisher
 {

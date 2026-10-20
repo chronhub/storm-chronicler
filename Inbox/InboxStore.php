@@ -12,13 +12,14 @@ use Throwable;
  *
  * Records the pair and runs the handler atomically; if the pair was already recorded, the handler is
  * skipped. This is the safety net for at-least-once delivery, where the outbox can re-drain and
- * Messenger retries: a stateful reaction stays correct across duplicates. Backs the `es_inbox` table.
+ * Messenger retries: a stateful reaction stays correct across duplicates. The `es_inbox` table backs it.
  */
 interface InboxStore
 {
     /**
-     * Run `$handler` once per `(consumer, messageId)`: record the pair and run the handler in one
-     * transaction; a duplicate is a no-op.
+     * Run `$handler` once per `(consumer, messageId)`, recording the pair in the same transaction.
+     *
+     * A duplicate is a no-op.
      *
      * @return bool true if the handler ran on first delivery, false if skipped as already processed
      *

@@ -13,13 +13,19 @@ use Storm\Chronicler\Directory\DbalStreamHeadStore;
 use Storm\Chronicler\Exception\StorageFailure;
 
 /**
- * The head store's translation duty at its OWN boundary: a driver failure of a statement never reaches
- * a caller as a Doctrine type, surfacing as the port-owned StorageFailure with the original chained,
- * under the operation label of the failing method. Four of the store's five methods, advance, bump,
- * lastVersion and delete, are pinned here as units, the Connection mocked; `lockForErase` is left to
- * the erasure path that owns it. lastVersion also reads its result back, an
- * absent row mapping to version 0. The integration StreamHeadStorageFailureTest still proves the read
- * crosses a REAL driver; a mock cannot.
+ * The head store's translation duty at its own boundary.
+ *
+ * A driver failure of a statement never reaches a caller as a Doctrine type: it surfaces as the
+ * port-owned `StorageFailure` with the original chained, under the operation label of the failing
+ * method. Four of the store's five methods are pinned here as units, with the `Connection` mocked:
+ *
+ * - `advance()`
+ * - `bump()`
+ * - `lastVersion()`, which also reads its result back, an absent row mapping to version 0
+ * - `delete()`
+ *
+ * `lockForErase()` is left to the erasure path that owns it. The integration
+ * `StreamHeadStorageFailureTest` still proves the read crosses a real driver, which a mock cannot.
  */
 final class DbalStreamHeadStoreTest extends TestCase
 {
@@ -29,7 +35,8 @@ final class DbalStreamHeadStoreTest extends TestCase
         $driverFailure = $this->driverFailure('deadlock on the head CAS');
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->once())->method('executeStatement')
-            ->with($this->anything(), ['stream' => 'order-1', 'newVersion' => 4, 'expectedVersion' => 3]) // bound params, pinned
+            // bound params, pinned
+            ->with($this->anything(), ['stream' => 'order-1', 'newVersion' => 4, 'expectedVersion' => 3])
             ->willThrowException($driverFailure);
 
         try {
@@ -65,14 +72,15 @@ final class DbalStreamHeadStoreTest extends TestCase
     #[Test]
     public function advance_creates_a_head_through_the_conflict_free_insert(): void
     {
-        // expectedVersion 0 is the CREATION arm, and it must not be served by the UPDATE: an update
-        // on a head that does not exist matches nothing and would report a conflict where the caller
-        // is entitled to create. The two arms are told apart by the statement, not by the outcome.
+        // `expectedVersion` 0 is the creation arm, and it must not be served by the `UPDATE`: an
+        // update on a head that does not exist matches nothing and would report a conflict where the
+        // caller is entitled to create. The statement tells the two arms apart, not the outcome
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->once())->method('executeStatement')
             ->with(
                 $this->stringContains('INSERT INTO stream_heads'),
-                ['stream' => 'order-1', 'newVersion' => 1], // no expectedVersion: the insert does not bind one
+                // no expectedVersion: the insert does not bind one
+                ['stream' => 'order-1', 'newVersion' => 1],
             )
             ->willReturn(1);
 
@@ -104,7 +112,8 @@ final class DbalStreamHeadStoreTest extends TestCase
             $this->fail('a driver failure of the bump must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause
-            $this->assertStringContainsString('the stream-head bump', $e->getMessage()); // the operation label
+            // the operation label
+            $this->assertStringContainsString('the stream-head bump', $e->getMessage());
             $this->assertStringContainsString('the wire dropped mid-bump', $e->getMessage());
         }
     }
@@ -123,7 +132,8 @@ final class DbalStreamHeadStoreTest extends TestCase
             $this->fail('a driver failure of the read must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause
-            $this->assertStringContainsString('the stream-head read', $e->getMessage()); // the operation label
+            // the operation label
+            $this->assertStringContainsString('the stream-head read', $e->getMessage());
             $this->assertStringContainsString('the head table vanished mid-read', $e->getMessage());
         }
     }
@@ -164,7 +174,8 @@ final class DbalStreamHeadStoreTest extends TestCase
             $this->fail('a driver failure of the deletion must surface as StorageFailure');
         } catch (StorageFailure $e) {
             $this->assertSame($driverFailure, $e->getPrevious()); // the original DBAL exception is the cause
-            $this->assertStringContainsString('the stream-head deletion', $e->getMessage()); // the operation label
+            // the operation label
+            $this->assertStringContainsString('the stream-head deletion', $e->getMessage());
             $this->assertStringContainsString('the wire dropped mid-delete', $e->getMessage());
         }
     }

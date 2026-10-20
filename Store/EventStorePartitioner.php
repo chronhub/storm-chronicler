@@ -12,28 +12,32 @@ use Storm\Stream\Exception\InvalidStreamException;
 use Storm\Stream\StreamCategory;
 
 /**
- * Provisions per-category LIST partitions of `event_store`, the ops side of the partitioned event
- * store.
+ * Provisions per-category `LIST` partitions of `event_store`, the ops side of the partitioned store.
  *
  * The schema ships `event_store PARTITION BY LIST (category)` with a single `event_store_default`
- * catch-all, so any category writes out of the box. This splits a known category out of the DEFAULT
- * into its own child so its rows no longer share the catch-all. Short names use
+ * catch-all, so any category writes out of the box. This splits a known category out of the default
+ * partition into its own child, so its rows no longer share the catch-all. Short names use
  * `event_store_p_<category>`; longer names include a digest within the server identifier limit.
  *
- * It creates only the child table: the parent's PK `(category, sequence_no)`, the UNIQUE
- * `(category, stream, version)` and the `sequence_no` index are PARTITIONED indexes, so Postgres
- * propagates them to every child automatically and there is nothing per-child to recreate; a
- * child-local unique without the partition key is exactly the trap to avoid.
+ * It creates only the child table: the parent's primary key `(category, sequence_no)`, the unique
+ * `(category, stream, version)` and the `sequence_no` index are partitioned indexes, so Postgres
+ * propagates them to every child and nothing per child needs recreating; a child-local unique without
+ * the partition key is the trap to avoid.
  *
- * Warning: provision EARLY, while the DEFAULT is empty for the category. Postgres does NOT migrate
- * rows out of the DEFAULT: creating a partition for a category that already has rows there is
- * simply REJECTED, since the new partition's constraint would contradict the DEFAULT's contents. The
- * split is then a manual recipe: detach, create, `INSERT ... SELECT`, delete, under an ACCESS
- * EXCLUSIVE window that grows with volume. `defaultVolumeFor()` surfaces the volume so a caller can
- * refuse before hitting the raw Postgres error; note that this class's direct API performs NO
- * volume guard itself. The `storm:event-store:partition` command does, and prints the recipe
- * instead of attempting the doomed split. In a design that provisioned its categories up front, the
- * DEFAULT stays empty and none of this arises.
+ * Warning: provision early, while the default partition holds no row of the category. Postgres does
+ * not migrate rows out of the default: creating a partition for a category that already has rows
+ * there is rejected, since the new partition's constraint would contradict the default's contents.
+ * The split is then a manual recipe, under an `ACCESS EXCLUSIVE` window that grows with volume:
+ *
+ * - Detach
+ * - Create
+ * - `INSERT ... SELECT`
+ * - Delete
+ *
+ * `defaultVolumeFor()` surfaces the volume so a caller can refuse before hitting the raw Postgres
+ * error, and this class's direct API performs no volume guard itself. The `storm:event-store:partition`
+ * command does, and prints the recipe instead of attempting the doomed split. When the categories are
+ * provisioned up front, the default stays empty and none of this arises.
  *
  * @see EventStoreSchema
  */
@@ -48,7 +52,8 @@ final readonly class EventStorePartitioner
      *
      * @param  list<string>  $categories  the configured values, each read under the `StreamCategory` rule
      *
-     * @throws InvalidStreamException when a category is not a bare, well-formed stream category, a config error
+     * @throws InvalidStreamException when a category is not a bare, well-formed stream category, a
+     *                                config error
      * @throws RuntimeException when the generated name is occupied or the identifier budget is too small
      * @throws Exception on a DBAL failure
      */
@@ -106,8 +111,9 @@ final readonly class EventStorePartitioner
             return $existing;
         }
 
-        // @infection-ignore-all; equivalent: the arithmetic and the comparison below read the numeric
+        // equivalent: the arithmetic and the comparison below read the numeric
         // answer as its integer, and `%d` formats it the same, so the cast answers the analyzer alone
+        // @infection-ignore-all
         $limit = (int) $this->connection->fetchOne("SELECT current_setting('max_identifier_length')::int");
         $prefix = 'event_store_p_';
         if (strlen($prefix.$category) <= $limit) {
@@ -141,9 +147,10 @@ final readonly class EventStorePartitioner
     }
 
     /**
-     * How many rows of this category still sit in `event_store_default`, the volume a split would
-     * migrate under an ACCESS EXCLUSIVE lock. Zero once the category has its own partition, or was
-     * never written.
+     * How many rows of this category still sit in `event_store_default`.
+     *
+     * It is the volume a split would migrate under an `ACCESS EXCLUSIVE` lock, and zero once the
+     * category has its own partition or was never written.
      *
      * @throws InvalidStreamException when the category is not a bare, well-formed stream category
      * @throws Exception on a DBAL failure

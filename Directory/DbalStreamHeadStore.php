@@ -10,17 +10,14 @@ use Storm\Chronicler\Exception\StorageFailure;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
- * Postgres StreamHeadStore on Doctrine DBAL. The head CAS `advance()` is split by intent: a pure
- * UPDATE when `expectedVersion > 0`, and an INSERT with a conditional conflict update when
- * `expectedVersion = 0`. The conflict arm advances only a head still at version 0, an empty stream;
- * it refuses every nonzero head. A positive-version CAS cannot recreate a deleted stream.
- * `bump()` and `lockForErase()` use their own `ON CONFLICT DO UPDATE` rules.
+ * The Postgres `StreamHeadStore` on Doctrine DBAL.
  *
- * It opens no transaction of its own, so its writes add no nesting inside the event store's
- * `transactional()` and projectors reuse it for reads outside any transaction.
+ * `advance()` splits the head CAS by intent, while `bump()` and `lockForErase()` use their own
+ * `ON CONFLICT DO UPDATE` rules. With no transaction of its own, the store adds no nesting inside the
+ * event store's `transactional()`, and projectors reuse it for reads outside any transaction.
  *
- * A transient driver failure, a deadlock or lock timeout, translates to RetryableStorageFailure,
- * which keeps Doctrine's retry marker so RetryEventStore retries a wrapped transient exactly as it
+ * A transient driver failure, a deadlock or a lock timeout, translates to `RetryableStorageFailure`,
+ * which keeps Doctrine's retry marker so `RetryEventStore` retries a wrapped transient exactly as it
  * retried the raw one.
  */
 #[AsAlias(StreamHeadStore::class)]
@@ -33,23 +30,25 @@ final readonly class DbalStreamHeadStore implements StreamHeadStore
     /**
      * {@inheritDoc}
      *
-     * Split by intent, never one UPSERT, because a CAS must NEVER be able to become a creation. A
-     * single `INSERT … ON CONFLICT DO UPDATE` served both once, and its conflict arm corrupts under
-     * a concurrent erase: a CAS with `expectedVersion > 0` that waits behind the eraser's head lock
-     * has its speculative insertion RE-ATTEMPTED by Postgres when the erase commits; the retry
-     * checks only the unique conflict, it does not re-evaluate the SELECT that guarded creation, so
-     * with the head row deleted the insert succeeds. The head reappears at `newVersion` above a
-     * history whose events were just erased: a silently wrong rehydration base, and a violation of
-     * both the eraser's "starts a fresh, coherent stream" contract and the creation axiom.
+     * The CAS is split by intent rather than one upsert, because a CAS must never become a creation. A
+     * single `INSERT … ON CONFLICT DO UPDATE` serving both corrupts under a concurrent erase: a CAS with
+     * `expectedVersion > 0` that waits behind the eraser's head lock has its speculative insertion
+     * attempted again by Postgres when the erase commits, and that retry checks only the unique
+     * conflict without re-evaluating the `SELECT` that guarded creation, so with the head row deleted
+     * the insert succeeds. The head reappears at `newVersion` above a history whose events were just
+     * erased: a silently wrong rehydration base, breaking both the eraser's "starts a fresh, coherent
+     * stream" contract and the creation axiom.
      *
-     * So `expectedVersion > 0` runs a pure UPDATE: under READ COMMITTED, the row a committed eraser
-     * deleted matches nothing, the CAS returns false, and the appender gets the loud OCC conflict
-     * it deserves. `expectedVersion = 0` inserts a new head or updates an existing head only while
-     * its version is 0. A creator waiting behind an erase inserts fresh after it commits; a
-     * nonzero head makes the conflict arm a no-op, returning false. An empty head can therefore
-     * receive its first append without weakening the version guard. `bump()` keeps its
-     * unconditional UPSERT: a fact append restarting a stream
-     * from scratch after an erase is its documented behavior, not a corruption.
+     * - `expectedVersion > 0` runs a pure `UPDATE`: under `READ COMMITTED`, the row a committed eraser
+     *   deleted matches nothing, the CAS returns false, and the appender gets a loud OCC conflict.
+     *
+     * - `expectedVersion = 0` inserts a new head, or updates an existing head only while its version
+     *   is 0. A creator waiting behind an erase inserts fresh after it commits, and a nonzero head makes
+     *   the conflict arm a no-op that returns false, so an empty head can receive its first append
+     *   without weakening the version guard.
+     *
+     * `bump()` keeps its unconditional upsert: a fact append that restarts a stream from scratch after
+     * an erase is its documented behavior, not a corruption.
      */
     public function advance(string $stream, int $expectedVersion, int $newVersion): bool
     {

@@ -10,15 +10,14 @@ use Storm\Contracts\Chronicler\StorageFailure as StorageFailureContract;
 use Throwable;
 
 /**
- * A storage operation failed for an infrastructural reason: the adapter-boundary translation of a
- * driver exception, Doctrine DBAL here, the driver's exception kept as the `getPrevious()` cause.
- * Implements the contracted `StorageFailureContract` on an SPL `RuntimeException`, so ports never
- * surface a driver type.
+ * The adapter-boundary translation of a Doctrine DBAL driver exception.
  *
- * Translation rule at the adapters: a driver failure carrying Doctrine's retry marker, a
- * `RetryableException` such as a deadlock or lock timeout, becomes a `RetryableStorageFailure` so
- * the retry decorator keeps matching it; everything else becomes this class. Use `wrap()`, which
- * picks the right one.
+ * The contracted `StorageFailureContract` sits on an SPL `RuntimeException`, so ports never surface a
+ * driver type.
+ *
+ * At the adapters, a driver failure that carries Doctrine's retry marker, a `RetryableException` such as
+ * a deadlock or a lock timeout, becomes a `RetryableStorageFailure` so the retry decorator keeps
+ * matching it; every other failure becomes this class. Use `wrap()`, which picks the right one.
  */
 class StorageFailure extends RuntimeException implements StorageFailureContract
 {
@@ -27,10 +26,6 @@ class StorageFailure extends RuntimeException implements StorageFailureContract
         parent::__construct($message, previous: $cause);
     }
 
-    /**
-     * Translate a driver failure at the port boundary, preserving retryability: a Doctrine
-     * `RetryableException` cause yields a {@see RetryableStorageFailure}.
-     */
     public static function wrap(string $operation, Throwable $cause): self
     {
         $message = sprintf('Storage failure during %s: %s', $operation, $cause->getMessage());

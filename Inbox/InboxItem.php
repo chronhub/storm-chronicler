@@ -7,8 +7,9 @@ namespace Storm\Chronicler\Inbox;
 use Closure;
 
 /**
- * One unit of work for a batched inbox run: the message id to deduplicate on and the handler to run if it
- * is the first delivery.
+ * One unit of work for a batched inbox run.
+ *
+ * It carries the message id to deduplicate on and the handler to run on first delivery.
  *
  * @see BatchInboxStore the store that consumes these
  */

@@ -12,8 +12,9 @@ use Storm\Chronicler\Store\RetryEventStore;
 use Storm\Stream\Stream;
 
 /**
- * Test double: a write chain whose append verbs throw a RetryableException the first
- * `$failures` times, then succeed, to exercise RetryEventStore.
+ * Test double for `RetryEventStore`: a write chain that fails, then succeeds.
+ *
+ * Its append verbs throw a `RetryableException` the first `$failures` times, then succeed.
  *
  * @see RetryEventStore
  */

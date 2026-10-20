@@ -18,10 +18,12 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 /**
- * The deploy-time `MissingUpcaster` verdict: verifies every stored event row is readable by THIS
- * binary's upcaster chain, before any read pays the failure. A version bump shipped without its
- * upcaster is invisible until the first old row is read, at runtime and mid-drain; this command
- * moves that verdict to the deploy, where a binary and an existing store first meet.
+ * The deploy-time `MissingUpcaster` verdict on every stored event row.
+ *
+ * It verifies that every stored row is readable by this binary's upcaster chain, before any read pays
+ * the failure. A version bump shipped without its upcaster is invisible until the first old row is read,
+ * at runtime and mid-drain; this command moves that verdict to the deploy, where a binary and an
+ * existing store first meet.
  *
  * The floor is computed from the data, `min(event_version)` per stored type, so the reset-based
  * posture, a bump on a fresh schema with no old rows, needs no declaration and passes clean.
@@ -75,10 +77,10 @@ final class UpcasterVerifyCommand extends Command
         $problems = array_map(static fn (ConformanceAnomaly $anomaly): string => $anomaly->problem, $anomalies);
 
         if ($input->getOption('json') === true) {
-            // a deployment gate is scripted by definition: the verdict rides the exit code, the reasons
-            // ride the document, and neither has to be scraped out of an error block. An anomaly's
+            // a deployment gate is scripted by definition: the verdict goes in the exit code, the reasons
+            // in the document, and neither has to be scraped out of an error block. An anomaly's
             // public properties encode to the very shape `toArray()` builds, so dropping the mapping is
-            // an equivalent mutant, left unignored on purpose: this statement's flag mutants are killed
+            // an equivalent mutant, left without an ignore: this statement's flag mutants are killed
             $output->writeln(json_encode(
                 [
                     'conformant' => $problems === [],

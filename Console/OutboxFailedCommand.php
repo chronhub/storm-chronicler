@@ -9,8 +9,9 @@ use JsonException;
 use Override;
 use Storm\Chronicler\Outbox\FailedOutboxMessage;
 use Storm\Chronicler\Outbox\OutboxDeadLetter;
+use Storm\Support\Console\DestructiveConfirmation;
 use Storm\Support\Console\PositiveIntOption;
-use Storm\Support\Text\Str;
+use Storm\Text\Str;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -20,24 +21,28 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 /**
- * Inspect / recover the outbox dead-letter, `status = 'failed'`; the operator counterpart to
- * RelayOutboxCommand, like `messenger:failed:show|retry`.
+ * Inspects and recovers the outbox dead-letter, `status = 'failed'`.
  *
- * - Show, the default: list one page of dead-lettered rows with id, position, type, attempts, and error.
- *   `--limit` bounds the page and `--after` resumes after an id. The same options bound collective retry.
+ * It is the operator counterpart of `RelayOutboxCommand`, like `messenger:failed:show|retry`.
  *
- * - `--retry --limit=N`: requeue one page to `pending`, clearing `attempts`, `next_attempt_at`, `last_error`, and
- *   `failed_at`, so the relay republishes them. The relay drains `ORDER BY id`, so re-queued rows go
- *   out in their original order, but events published after the row was dead-lettered already went
- *   out, so a replayed event is re-emitted late, recovery not time travel. Fix the root cause first.
+ * - Show, the default: lists one page of dead-lettered rows with id, position, type, attempts and
+ *   error. `--limit` bounds the page and `--after` resumes after an id; the same options bound
+ *   collective retry.
  *
- * - `--purge`: delete them for good. Without an id it shows the count and asks, since these rows are
+ * - `--retry --limit=N`: requeues one page to `pending`, clearing `attempts`, `next_attempt_at`,
+ *   `last_error` and `failed_at`, so the relay republishes them. The relay drains `ORDER BY id`, so
+ *   requeued rows go out in their original order, but events published after the row was dead-lettered
+ *   already went out, so a replayed event is re-emitted late, after events that followed it. Fix the
+ *   root cause first.
+ *
+ * - `--purge`: deletes them for good. Without an id it shows the count and asks, since these rows are
  *   the only record of why the publication failed and a requeue after the fix is the normal ending;
  *   `--force` answers for a non-interactive session. An id-scoped purge names its target, so it asks
  *   nothing.
  *
- * An optional `id` argument scopes `--retry` / `--purge` to a single row; omit it to inspect or retry a page, or purge all failed
- * rows. Collective retry requires an explicit limit and accepts an exact `--type` filter.
+ * An optional `id` argument scopes `--retry` or `--purge` to a single row; omit it to inspect or retry a
+ * page, or to purge all failed rows. Collective retry requires an explicit limit and accepts an exact
+ * `--type` filter.
  *
  * Examples:
  *
@@ -56,6 +61,8 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 )]
 final class OutboxFailedCommand extends Command
 {
+    use DestructiveConfirmation;
+
     public function __construct(
         private readonly OutboxDeadLetter $deadLetter,
     ) {
@@ -72,14 +79,14 @@ final class OutboxFailedCommand extends Command
         $this->addOption('json', null, InputOption::VALUE_NONE, 'Print the machine-readable dead-letter rows, the error untruncated');
         $this->addOption('retry', null, InputOption::VALUE_NONE, 'Requeue the failed row(s) to pending');
         $this->addOption('purge', null, InputOption::VALUE_NONE, 'Delete the failed row(s)');
-        $this->addOption('force', null, InputOption::VALUE_NONE, 'Confirm a --purge of ALL failed rows without asking (required when the session is non-interactive)');
+        $this->configureForce('a --purge with no id deletes every dead-lettered row, the only record of their failure');
     }
 
     /**
      * {@inheritDoc}
      *
      * @throws JsonException when a machine document cannot be encoded
-     * @throws Exception on a DBAL failure of the inspect / requeue / purge query
+     * @throws Exception on a DBAL failure of the inspect, requeue or purge query
      */
     #[Override]
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -93,7 +100,7 @@ final class OutboxFailedCommand extends Command
 
         if ($retry && $purge) {
             // stderr, and on every refusal below: this command has a machine channel, and a refusal
-            // printed on stdout lands INSIDE the document a caller is piping into a parser
+            // printed on stdout lands inside the document a caller is piping into a parser
             $io->getErrorStyle()->error('Use either --retry or --purge, not both.');
 
             return Command::INVALID;
@@ -105,7 +112,7 @@ final class OutboxFailedCommand extends Command
         // id 0, match nothing, and report a success-shaped "nothing to do" to an operator who
         // believes they aimed at a row. The shared parser also refuses "0" itself, which
         // `ctype_digit` accepts while the error text promises a positive integer, and a digit string
-        // too long to represent, which PHP saturates at PHP_INT_MAX instead of rejecting.
+        // too long to represent, which PHP saturates at `PHP_INT_MAX` instead of rejecting.
         $id = null;
 
         if ($idArg !== null) {
@@ -277,14 +284,11 @@ final class OutboxFailedCommand extends Command
     /**
      * Purge, with an interlock on the bulk form only.
      *
-     * These rows are the ONLY built-in record of why a publication failed, and a requeue after the
-     * root cause is fixed is the normal ending, so deleting the whole dead-letter is not a cleanup,
-     * it is discarding the evidence and the pending recovery in one keystroke. An id-scoped purge
-     * names what it kills and stays friction-free; the bulk form states the count first, then asks,
-     * or takes `--force` when nobody is there to answer.
+     * Deleting the whole dead-letter discards the evidence and the pending recovery in one keystroke, so
+     * the bulk form states the count first, then asks, or takes `--force` when nobody is there to answer.
      *
      * @throws JsonException when the machine document cannot be encoded
-     * @throws Exception on a DBAL failure of the count / delete
+     * @throws Exception on a DBAL failure of the count or the delete
      */
     private function purge(SymfonyStyle $io, InputInterface $input, OutputInterface $output, ?int $id, bool $json): int
     {
@@ -302,23 +306,17 @@ final class OutboxFailedCommand extends Command
             return Command::SUCCESS;
         }
 
-        if ($id === null && $input->getOption('force') !== true) {
-            // a caller asking for a document is driving this from a script, so the interlock takes
-            // `--force` there as it does with no terminal: a prompt would block a pipeline forever,
-            // and answering it would print a question into the document
-            if ($json || ! $input->isInteractive()) {
-                $io->getErrorStyle()->error(sprintf(
-                    '--purge with no id deletes all %d dead-lettered row(s), the only record of their failure, and the session is non-interactive: pass --force to confirm, or an id to purge one row.',
-                    $count,
-                ));
-
-                return Command::INVALID;
-            }
-
-            if (! $io->confirm(sprintf('Delete all %d dead-lettered message(s)? They cannot be requeued afterwards.', $count), false)) {
-                $io->warning('Aborted — nothing was purged.');
-
-                return Command::SUCCESS;
+        if ($id === null) {
+            // the gate reads a --json run as non-interactive: a prompt would block the script that
+            // asked for a document, and an answered one would print a question into it
+            $status = $this->confirmDestructive(
+                $io,
+                $input,
+                sprintf('Delete all %d dead-lettered message(s)?', $count),
+                sprintf('--purge with no id deletes all %d dead-lettered row(s), the only record of their failure, and none can be requeued afterwards; an id purges one row.', $count),
+            );
+            if ($status !== null) {
+                return $status;
             }
         }
 
@@ -341,8 +339,8 @@ final class OutboxFailedCommand extends Command
             return '—';
         }
 
-        // `last_error` can be multi-line, a class plus its cause chain, so collapse to keep the table one row tall;
-        // the full value stays in the column for whoever queries it.
+        // `last_error` can be multi-line, a class plus its cause chain, so collapse it to keep the table
+        // one row tall; the full value stays in the column for whoever queries it.
         return $error |> Str::oneLine(...) |> Str::excerpt(60);
     }
 }

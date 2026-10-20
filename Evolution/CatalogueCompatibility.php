@@ -20,39 +20,61 @@ use function sort;
 use function sprintf;
 
 /**
- * The declaration-level compatibility verdict: given the message catalogue a revision published and
- * the one this revision publishes, reports alias-resolution and event-version incompatibilities,
- * including upcaster failures and incompatible declared personal contexts.
+ * The declaration-level compatibility verdict between two revisions' published message declarations.
  *
- * The upstream face of {@see UpcasterConformance}, and the two do not overlap. Conformance answers
- * "can this binary read the store in front of me", computed FROM the rows, which ties it to a store
- * and therefore to a deployment. This one answers "would this change break a store that holds the
- * previous shapes", computed from two DECLARATIONS, which needs no store at all. Only one of the two
- * can speak before the row exists, and that is the one that can run on a pull request.
+ * Given the declarations a revision published and those this revision publishes, it reports
+ * alias-resolution and event-version incompatibilities, upcaster failures and incompatible declared
+ * personal contexts included. Commands are judged on their aliases alone: a command has no version and
+ * nothing upcasts it.
  *
- * The rules are the event-change matrix and nothing invented here. A PHP class renamed under a
- * stable alias is refused when its current destination is declared personal. Other class renames
- * pass at the type-resolution boundary unless the historical declaration is personal. Enriched
- * entries also preserve the historical subject and keys. Declarations do not establish that every
- * stored field remains readable, and alias stability alone does not migrate encrypted data.
+ * It is the upstream face of {@see UpcasterConformance}, and the two do not overlap. Conformance asks
+ * whether this binary can read the store in front of it, computed from the rows, which ties it to a
+ * store and so to a deployment. This verdict asks whether the change would break a store that holds the
+ * previous shapes, computed from two declarations, with no store at all. Only this one can speak before
+ * the row exists, which is what lets it run on a pull request.
  *
- * What it cannot see is worth naming, because a gate trusted beyond its reach is worse than none. It
- * reads declarations, so an undeclared payload key renamed at a constant version passes it: shapes are not
- * catalogued, deliberately, a verdict derived from reading accessors being a heuristic where these
- * are exact. And a change of MEANING under a stable alias and version is invisible to any tool; the
- * matrix routes it to a new alias, and only a reviewer enforces that.
+ * The rules are the event-change matrix and nothing invented here:
+ *
+ * - A PHP class renamed under a stable alias is refused when its current destination is declared
+ *   personal.
+ *
+ * - Other class renames pass at the type-resolution boundary unless the historical declaration is
+ *   personal.
+ *
+ * - Enriched entries also preserve the historical subject and keys.
+ *
+ * Declarations do not establish that every stored field remains readable, and alias stability alone
+ * does not migrate encrypted data.
+ *
+ * Its blind spots are named here, because a gate trusted beyond its reach is worse than none. It reads
+ * declarations, so an undeclared payload key renamed at a constant version passes it: payload shapes
+ * stay out of the declarations, since a verdict derived from reading accessors would be a heuristic
+ * where these are exact. A change of meaning under a stable alias and version is invisible to any
+ * tool; the matrix routes it to a new alias, and only a reviewer enforces that.
+ *
+ * @phpstan-type CatalogueEntry array{
+ *     class: string,
+ *     version: int,
+ *     replaces: list<string>,
+ *     personal?: array{subject: string, keys: list<string>}|null,
+ * }
+ * @phpstan-type CommandEntry array{class: string, replaces: list<string>}
  */
 final readonly class CatalogueCompatibility
 {
     /**
-     * The format emitted by the catalogue writer; reading a format does not enable its emission.
+     * The format the `MessageCatalogue` writer emits; reading a format does not enable its emission.
      */
     public const int SCHEMA_VERSION = 1;
 
     public const array READABLE_SCHEMA_VERSIONS = [1, 2];
 
     /**
-     * @param  array<string, array{subject: string, keys: list<string>, fallbacks: array<string, mixed>}>  $personalData
+     * @param  array<string, array{
+     *     subject: string,
+     *     keys: list<string>,
+     *     fallbacks: array<string, mixed>,
+     * }>  $personalData
      */
     public function __construct(
         private UpcasterChain $upcasters,
@@ -62,8 +84,8 @@ final readonly class CatalogueCompatibility
     /**
      * One line per detected incompatibility, empty when all checked declarations are compatible.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $baseline  the catalogue of the revision being compared against
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current  the catalogue this revision publishes
+     * @param  array<string, CatalogueEntry>  $baseline  the declarations of the revision compared against
+     * @param  array<string, CatalogueEntry>  $current  the declarations this revision publishes
      * @return list<string>
      */
     public function verdicts(array $baseline, array $current): array
@@ -176,7 +198,8 @@ final readonly class CatalogueCompatibility
                 continue;
             }
 
-            // A new canonical alias invalidates earlier chain proofs, so every historical step needs checking.
+            // A new canonical alias invalidates earlier chain proofs, so every historical step needs
+            // checking.
             $from = $canonicalChanged ? 1 : $was;
             $to = $is;
 
@@ -226,9 +249,33 @@ final readonly class CatalogueCompatibility
     }
 
     /**
+     * One line per command alias the baseline resolved and this revision no longer declares, empty when
+     * there is none.
+     *
+     * The alias is the whole contract of a command: a pending outbox row stored under a lost alias
+     * resolves no class at the relay and is dead-lettered.
+     *
+     * @param  array<string, CommandEntry>  $baseline  the commands of the revision compared against
+     * @param  array<string, CommandEntry>  $current  the commands this revision publishes
+     * @return list<string>
+     */
+    public function commandVerdicts(array $baseline, array $current): array
+    {
+        $lost = array_diff(self::resolvable($baseline), self::resolvable($current)) |> array_values(...);
+
+        return array_map(
+            static fn (int|string $alias): string => sprintf(
+                'command alias "%s" no longer resolves to any declared command — pending outbox rows stored under it are dead-lettered; keep it as a `replaces` entry if the rename is deliberate',
+                $alias,
+            ),
+            $lost,
+        );
+    }
+
+    /**
      * Rejects a current document whose personal contexts disagree with the running container.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current
+     * @param  array<string, CatalogueEntry>  $current
      * @return list<string>
      */
     public function currentPersonalMismatches(array $current): array
@@ -242,9 +289,11 @@ final readonly class CatalogueCompatibility
     }
 
     /**
-     * Whether an entry's personal declaration agrees with the running container, both absent counting as agreement.
+     * Whether an entry's personal declaration agrees with the running container.
      *
-     * @param  array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}  $entry
+     * A declaration absent on both sides counts as agreement.
+     *
+     * @param  CatalogueEntry  $entry
      */
     private function matchesRuntime(array $entry): bool
     {
@@ -265,12 +314,12 @@ final readonly class CatalogueCompatibility
     /**
      * Every alias the baseline could resolve and this revision cannot, canonical or replaced alike.
      *
-     * The two cases collapse into one check on purpose, because the store cannot tell them apart: a
+     * The two cases collapse into one check because the store cannot tell them apart: a
      * canonical alias deleted and a `replaces` entry dropped both leave rows carrying a type that
      * now resolves to nothing, and both are readable again only by putting the name back.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $baseline
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $current
+     * @param  array<string, CatalogueEntry>  $baseline
+     * @param  array<string, CatalogueEntry>  $current
      * @return list<string>
      */
     private function unresolvable(array $baseline, array $current): array
@@ -287,9 +336,9 @@ final readonly class CatalogueCompatibility
     }
 
     /**
-     * Every alias a catalogue can resolve: each canonical name plus the former names it still answers to.
+     * Every alias the declarations resolve: each canonical name plus the former names it still answers to.
      *
-     * @param  array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>  $catalogue
+     * @param  array<string, CatalogueEntry|CommandEntry>  $catalogue
      * @return list<string>
      */
     private static function resolvable(array $catalogue): array

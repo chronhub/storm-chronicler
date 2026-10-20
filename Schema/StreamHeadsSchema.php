@@ -7,19 +7,20 @@ namespace Storm\Chronicler\Schema;
 /**
  * Raw PostgreSQL DDL for `stream_heads`, the optimistic-concurrency watermark.
  *
- * One row per stream. `last_version` is the CAS target on append, and `… WHERE last_version =
- * :expected` is what detects a conflict.
+ * One row per stream. `last_version` is the CAS target on append, and
+ * `… WHERE last_version = :expected` is what detects a conflict.
  *
- * `stream` PINS its collation to `C`, and that is load-bearing rather than tidy. The snapshot sweep
- * reads one category as the key range `[category-, category.)`, which is only a contiguous slice
- * where `-` sorts before `.`; under a libc locale collation punctuation weighs less than letters, so
- * the upper bound falls BELOW every stream of the category. The sweep therefore compares its range
- * under an explicit `COLLATE "C"`, which keeps the range right whatever the column says, and the pin
- * is what lets the primary-key index serve that comparison: a column whose pin has drifted costs the
- * index, not the range. Its join with `snapshots` names no collation and needs the pair to agree,
- * which `SnapshotSchema` states. The database's own collation cannot be relied on either: two
- * clusters declaring `en_US.utf8` sort `-` against `.` differently depending on whether they link
- * musl or glibc.
+ * `stream` pins its collation to `C`, and the snapshot sweep depends on it. The sweep reads one
+ * category as the key range `[category-, category.)`, which is only a contiguous slice where `-` sorts
+ * before `.`; under a libc locale collation punctuation weighs less than letters, so the upper bound
+ * falls below every stream of the category.
+ *
+ * The sweep therefore compares its range under an explicit `COLLATE "C"`, which keeps the range right
+ * whatever the column says, and the pin is what lets the primary-key index serve that comparison: a
+ * column whose pin has drifted costs the index, not the range. Its join with `snapshots` names no
+ * collation and needs the pair to agree, which `SnapshotSchema` states. The database's own collation
+ * cannot be relied on either: two clusters declaring `en_US.utf8` sort `-` against `.` differently
+ * depending on whether they link musl or glibc.
  *
  * @see EventStoreSchema
  * @see \Storm\AggregateRepository\Snapshot\DbalSnapshotStore::staleStreams() the range that depends on it

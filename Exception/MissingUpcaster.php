@@ -9,10 +9,11 @@ use Storm\Chronicler\Evolution\Upcaster;
 use Storm\Contracts\Chronicler\UndecodableRow;
 
 /**
- * The upcaster chain has a gap: a stored event must move past a version step for which no
- * Upcaster is registered. Bumping a version requires shipping its upcaster, so this is a wiring
- * or deployment error to fix, not a runtime condition to handle, hence a `LogicException` that
- * fails fast and is never caught in the business flow.
+ * The upcaster chain has a gap: a stored event must cross a version step with no registered `Upcaster`.
+ *
+ * Bumping a version requires shipping its upcaster, so this is a wiring or deployment error to fix
+ * rather than a runtime condition to handle: a `LogicException` that fails fast and that the business
+ * flow never catches.
  *
  * @see Upcaster
  */

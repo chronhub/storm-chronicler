@@ -12,17 +12,20 @@ use Storm\Stream\StreamName;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
- * Postgres StreamExistence on Doctrine DBAL, reading the two authoritative sides of the store.
+ * The Postgres `StreamExistence` on Doctrine DBAL, reading the two authoritative sides of the store.
  *
- * `hasStream` reads the stream-heads registry: one primary-key probe on a plain table, no
- * partition routing. `hasCategory` reads the event store itself, where `category` is the LIST
- * partition key: the probe prunes to the category's partition and stops at its first row. A
- * secondary existence query against `event_store` for an exact stream, where category and stream
- * ride the `(category, stream, version)` unique index, stays a fallback, unused here.
+ * - `hasStream()` reads the stream-heads registry: one primary-key probe on a plain table, with no
+ *   partition routing.
  *
- * Runs only statements on the injected connection and never opens a transaction. Every driver
- * failure is translated at this boundary into the port's contracted StorageFailure with the DBAL
- * exception kept as cause.
+ * - `hasCategory()` reads the event store itself, where `category` is the `LIST` partition key: the
+ *   probe prunes to the category's partition and stops at its first row.
+ *
+ * A secondary existence query against `event_store` for an exact stream, using the
+ * `(category, stream, version)` unique index, stays a fallback, unused here.
+ *
+ * It runs only statements on the injected connection and never opens a transaction. Every driver
+ * failure is translated at this boundary into the port's contracted `StorageFailure`, with the DBAL
+ * exception kept as the cause.
  */
 #[AsAlias(StreamExistence::class)]
 final readonly class DbalStreamExistence implements StreamExistence

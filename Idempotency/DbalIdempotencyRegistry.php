@@ -9,15 +9,18 @@ use Doctrine\DBAL\Exception;
 use InvalidArgumentException;
 use Storm\Chronicler\Exception\IdempotencyConflict;
 use Storm\Chronicler\Exception\InvalidIdempotencyClaim;
+use Storm\Chronicler\Exception\StorageFailure;
 use Storm\Contracts\Chronicler\IdempotencyRegistry;
 use Storm\Contracts\Message\MetaIdentityGenerator;
 use Storm\Support\Dbal\BatchedDelete;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
- * Serializes claims with PostgreSQL's unique key and row lock. The short transaction ends
- * before the caller can dispatch; a failed dispatch never releases the persisted identity.
- * No-op conflict updates lock the winning row before checking its current expiration.
+ * Serializes claims with PostgreSQL's unique key and row lock.
+ *
+ * The short transaction ends before the caller can dispatch, and a failed dispatch never releases the
+ * persisted identity. A no-op conflict update locks the winning row before its current expiration is
+ * checked.
  */
 #[AsAlias(IdempotencyRegistry::class)]
 final readonly class DbalIdempotencyRegistry implements IdempotencyRegistry
@@ -42,43 +45,47 @@ final readonly class DbalIdempotencyRegistry implements IdempotencyRegistry
         }
         $this->requireAutocommit();
 
-        return $this->connection->transactional(function () use ($scopeHash, $keyHash, $fingerprint): string {
-            $candidate = $this->identity->generate();
-            $row = $this->connection->fetchAssociative(
-                /* language=PostgreSQL */
-                <<<'SQL'
-                    INSERT INTO es_idempotency (scope_hash, key_hash, fingerprint, message_id, expires_at)
-                    VALUES (:scope, :key, :fingerprint, :identity, clock_timestamp() + make_interval(secs => :lifetime))
-                    ON CONFLICT (scope_hash, key_hash) DO UPDATE SET key_hash = EXCLUDED.key_hash
-                    RETURNING fingerprint, message_id, expires_at <= clock_timestamp() AS expired
-                    SQL,
-                ['scope' => $scopeHash, 'key' => $keyHash, 'fingerprint' => $fingerprint,
-                    'identity' => $candidate, 'lifetime' => $this->lifetimeSeconds],
-            );
-            if ($row === false) {
-                throw new InvalidIdempotencyClaim('The registry did not return its locked claim.');
-            }
-            if ($row['expired'] === true) {
+        try {
+            return $this->connection->transactional(function () use ($scopeHash, $keyHash, $fingerprint): string {
                 $candidate = $this->identity->generate();
-                $this->connection->executeStatement(
+                $row = $this->connection->fetchAssociative(
                     /* language=PostgreSQL */
                     <<<'SQL'
-                        UPDATE es_idempotency SET fingerprint = :fingerprint, message_id = :identity,
-                            expires_at = clock_timestamp() + make_interval(secs => :lifetime)
-                        WHERE scope_hash = :scope AND key_hash = :key
+                        INSERT INTO es_idempotency (scope_hash, key_hash, fingerprint, message_id, expires_at)
+                        VALUES (:scope, :key, :fingerprint, :identity, clock_timestamp() + make_interval(secs => :lifetime))
+                        ON CONFLICT (scope_hash, key_hash) DO UPDATE SET key_hash = EXCLUDED.key_hash
+                        RETURNING fingerprint, message_id, expires_at <= clock_timestamp() AS expired
                         SQL,
                     ['scope' => $scopeHash, 'key' => $keyHash, 'fingerprint' => $fingerprint,
                         'identity' => $candidate, 'lifetime' => $this->lifetimeSeconds],
                 );
+                if ($row === false) {
+                    throw new InvalidIdempotencyClaim('The registry did not return its locked claim.');
+                }
+                if ($row['expired'] === true) {
+                    $candidate = $this->identity->generate();
+                    $this->connection->executeStatement(
+                        /* language=PostgreSQL */
+                        <<<'SQL'
+                            UPDATE es_idempotency SET fingerprint = :fingerprint, message_id = :identity,
+                                expires_at = clock_timestamp() + make_interval(secs => :lifetime)
+                            WHERE scope_hash = :scope AND key_hash = :key
+                            SQL,
+                        ['scope' => $scopeHash, 'key' => $keyHash, 'fingerprint' => $fingerprint,
+                            'identity' => $candidate, 'lifetime' => $this->lifetimeSeconds],
+                    );
 
-                return $candidate;
-            }
-            if (! hash_equals((string) $row['fingerprint'], $fingerprint)) {
-                throw new IdempotencyConflict('This request key is already bound to a different request.');
-            }
+                    return $candidate;
+                }
+                if (! hash_equals((string) $row['fingerprint'], $fingerprint)) {
+                    throw new IdempotencyConflict('This request key is already bound to a different request.');
+                }
 
-            return (string) $row['message_id'];
-        });
+                return (string) $row['message_id'];
+            });
+        } catch (Exception $e) {
+            throw StorageFailure::wrap('the idempotency claim', $e);
+        }
     }
 
     /**

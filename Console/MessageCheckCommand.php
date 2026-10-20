@@ -32,22 +32,25 @@ use function sprintf;
 use function trim;
 
 /**
- * The pull-request verdict: compares the message catalogue a revision published with the one this
- * revision publishes, and refuses a change that would make an existing store unreadable.
+ * The pull-request verdict, refusing a declaration change that would make an existing store unreadable.
  *
- * The upstream face of `storm:upcaster:verify`, and it needs no database, which is the whole reason
- * it can run where that one cannot. Verify computes its floor FROM the rows, so it speaks about a
- * store that exists, at deploy. This compares two DECLARATIONS, so it speaks before any row does.
- * Neither covers the other.
+ * It compares the message declarations a revision published with those this revision publishes. It is
+ * the upstream face of `storm:upcaster:verify` and needs no database, which is why it can run where that
+ * one cannot: verify computes its floor from the rows, so it speaks about a store that exists, at
+ * deploy, while this compares two declarations, so it speaks before any row does. Neither covers the
+ * other.
+ *
+ * Commands are compared by alias alone, since a command has no version. A baseline without a
+ * `commands` section declares none, so a first catalog that lists them passes; a current document
+ * without the section its baseline has came from an older writer, and is refused rather than judged.
  *
  * The writer emits format 1. Format 2 inputs carry personal declarations and must agree with the
  * current container on the current side. Their historical metadata is declarative, not an
  * attestation of provenance. A consumer must bind generated documents to its sources with a drift
  * test before treating them as its tracked contract. Mixed formats cannot establish compatibility.
  *
- * A document whose `schema_version` this binary does not know is REFUSED rather than judged. A
- * verdict about fields it guessed at would be worse than no verdict, since it would carry the same
- * green.
+ * A document whose `schema_version` this binary does not know is refused rather than judged: a verdict
+ * about fields it guessed at would be worse than no verdict, since it would carry the same green.
  *
  * Examples:
  *
@@ -94,6 +97,12 @@ final class MessageCheckCommand extends Command
             return Command::FAILURE;
         }
 
+        if ($baseline['commands'] !== null && $current['commands'] === null) {
+            $io->error('The current catalogue has no commands section while its baseline has one, as from a writer older than the baseline; the message contract was not judged.');
+
+            return Command::FAILURE;
+        }
+
         if ($current['schema_version'] === 2) {
             $mismatches = $this->compatibility->currentPersonalMismatches($current['events']);
             if ($mismatches !== []) {
@@ -104,7 +113,10 @@ final class MessageCheckCommand extends Command
             }
         }
 
-        $problems = $this->compatibility->verdicts($baseline['events'], $current['events']);
+        $problems = [
+            ...$this->compatibility->verdicts($baseline['events'], $current['events']),
+            ...$this->compatibility->commandVerdicts($baseline['commands'] ?? [], $current['commands'] ?? []),
+        ];
 
         if ($problems === []) {
             $io->success($current['schema_version'] === 2
@@ -121,12 +133,21 @@ final class MessageCheckCommand extends Command
     }
 
     /**
-     * The validated format and entries of a catalogue file, or null with the reason said out loud.
+     * The validated format and entries of a declarations file, or null after printing the reason.
      *
-     * Every refusal here is a refusal to JUDGE, never a compatibility verdict, and the two must not
+     * Every refusal here is a refusal to judge, never a compatibility verdict, and the two must not
      * be confused by a reader: an unreadable document says nothing about the contract.
      *
-     * @return array{schema_version: int, events: array<string, array{class: string, version: int, replaces: list<string>, personal?: array{subject: string, keys: list<string>}|null}>}|null
+     * @return array{
+     *     schema_version: int,
+     *     events: array<string, array{
+     *         class: string,
+     *         version: int,
+     *         replaces: list<string>,
+     *         personal?: array{subject: string, keys: list<string>}|null,
+     *     }>,
+     *     commands: array<string, array{class: string, replaces: list<string>}>|null,
+     * }|null
      */
     private function catalogue(string $path, SymfonyStyle $io): ?array
     {
@@ -151,11 +172,10 @@ final class MessageCheckCommand extends Command
         }
 
         if (! in_array($document['schema_version'], CatalogueCompatibility::READABLE_SCHEMA_VERSIONS, true)) {
-            // The `(string)` cast below survives mutation and the pin is WITHHELD on purpose: its line
-            // also carries the ternary, which tests DO kill, and `@infection-ignore-all` matches by
-            // line, so pinning here would smother a mutant the suite catches. `%s` performs the same
-            // conversion, so the cast buys the analyser a type and the output nothing; it is an
-            // equivalent this scope carries rather than one it silences.
+            // `%s` renders a scalar as the cast does, so the `(string)` below answers the analyzer alone: the
+            // gate's configuration leaves that equivalent out on its line, for this mutator only. Infection's
+            // `ExcludeIgnoredNodesVisitor` skips a node and its subtree, here the ternary the tests kill too,
+            // once `str_contains` finds the directive's name in any comment attached to it, prose included
             $io->error(sprintf(
                 'The catalogue at "%s" is format version %s and this binary reads versions %s — regenerate it, or read it with the binary that wrote it.',
                 $path,
@@ -166,51 +186,25 @@ final class MessageCheckCommand extends Command
             return null;
         }
 
-        $index = 0;
-        foreach ($document['events'] as $alias => $entry) {
-            $aliasString = (string) $alias;
-            if (trim($aliasString) === '') {
-                $location = sprintf('events[%d]', $index);
+        $diagnosis = self::diagnoseSection('events', $document['events'], versioned: true, personal: $document['schema_version'] === 2);
+
+        // a document without the section, as one an older writer produced, says nothing of the commands
+        $commands = null;
+        if ($diagnosis === null && array_key_exists('commands', $document)) {
+            if (! is_array($document['commands'])) {
                 $io->error(sprintf(
-                    'The catalogue at "%s" contains an invalid entry at %s: alias cannot be empty; the message contract was not judged.',
+                    'The catalogue at "%s" contains an invalid section at commands: must be a JSON object (received %s); the message contract was not judged.',
                     $path,
-                    $location,
+                    get_debug_type($document['commands']),
                 ));
 
                 return null;
             }
 
-            $diagnosis = self::diagnoseEntry($entry);
-            if ($diagnosis === null && $document['schema_version'] === 2) {
-                $diagnosis = self::diagnosePersonal($entry);
-            }
-            if ($diagnosis !== null) {
-                [$suffix, $reason] = $diagnosis;
-                // @infection-ignore-all; equivalent: `%s` below renders the one false `json_encode()` can
-                // answer as the empty string the cast would produce, so the cast answers the analyzer alone
-                $aliasKey = (string) json_encode($aliasString, JSON_UNESCAPED_SLASHES);
-                $location = sprintf('events[%s]%s', $aliasKey, $suffix);
-                $io->error(sprintf(
-                    'The catalogue at "%s" contains an invalid entry at %s: %s; the message contract was not judged.',
-                    $path,
-                    $location,
-                    $reason,
-                ));
-
-                return null;
-            }
-
-            $index++;
+            $diagnosis = self::diagnoseSection('commands', $document['commands'], versioned: false, personal: false);
+            $commands = $document['commands'];
         }
 
-        $events = $document['events'];
-        if ($document['schema_version'] === 1) {
-            $events = array_map(
-                static fn (array $entry): array => ['class' => $entry['class'], 'version' => $entry['version'], 'replaces' => $entry['replaces']],
-                $events,
-            );
-        }
-        $diagnosis = self::diagnoseAliasClaims($events);
         if ($diagnosis !== null) {
             [$location, $reason] = $diagnosis;
             $io->error(sprintf(
@@ -223,38 +217,98 @@ final class MessageCheckCommand extends Command
             return null;
         }
 
-        return ['schema_version' => $document['schema_version'], 'events' => $events];
+        $events = $document['events'];
+        if ($document['schema_version'] === 1) {
+            $events = array_map(
+                static fn (array $entry): array => ['class' => $entry['class'], 'version' => $entry['version'], 'replaces' => $entry['replaces']],
+                $events,
+            );
+        }
+        $diagnosis = self::diagnoseAliasClaims(['events' => $events, 'commands' => $commands ?? []]);
+        if ($diagnosis !== null) {
+            [$location, $reason] = $diagnosis;
+            $io->error(sprintf(
+                'The catalogue at "%s" contains an invalid entry at %s: %s; the message contract was not judged.',
+                $path,
+                $location,
+                $reason,
+            ));
+
+            return null;
+        }
+
+        return ['schema_version' => $document['schema_version'], 'events' => $events, 'commands' => $commands];
     }
 
     /**
-     * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $events
+     * The location and reason of the first invalid entry of one section, or null when every entry holds.
+     *
+     * @param  array<array-key, mixed>  $entries
      * @return array{string, string}|null
      */
-    private static function diagnoseAliasClaims(array $events): ?array
+    private static function diagnoseSection(string $section, array $entries, bool $versioned, bool $personal): ?array
+    {
+        $index = 0;
+        foreach ($entries as $alias => $entry) {
+            $aliasString = (string) $alias;
+            if (trim($aliasString) === '') {
+                return [sprintf('%s[%d]', $section, $index), 'alias cannot be empty'];
+            }
+
+            $diagnosis = self::diagnoseEntry($entry, $versioned);
+            if ($diagnosis === null && $personal) {
+                $diagnosis = self::diagnosePersonal($entry);
+            }
+            if ($diagnosis !== null) {
+                [$suffix, $reason] = $diagnosis;
+                // equivalent: `%s` below renders the one false `json_encode()` can
+                // answer as the empty string the cast would produce, so the cast answers the analyzer alone
+                // @infection-ignore-all
+                $aliasKey = (string) json_encode($aliasString, JSON_UNESCAPED_SLASHES);
+
+                return [sprintf('%s[%s]%s', $section, $aliasKey, $suffix), $reason];
+            }
+
+            $index++;
+        }
+
+        return null;
+    }
+
+    /**
+     * The first alias two declarations claim, across both sections, since the alias map resolves one
+     * alias to one class whatever its sort.
+     *
+     * @param  array<string, array<array-key, array{class: string, replaces: list<string>}>>  $sections
+     * @return array{string, string}|null
+     */
+    private static function diagnoseAliasClaims(array $sections): ?array
     {
         $claims = [];
-        foreach ($events as $canonical => $entry) {
-            $canonical = (string) $canonical;
-            $location = sprintf('events[%s]', (string) json_encode($canonical, JSON_UNESCAPED_SLASHES));
-            if (isset($claims[$canonical])) {
-                return [$location, 'alias is already claimed at '.$claims[$canonical]];
-            }
-            $claims[$canonical] = $location;
-            $local = [];
+        foreach ($sections as $section => $entries) {
+            foreach ($entries as $canonical => $entry) {
+                $canonical = (string) $canonical;
+                $location = sprintf('%s[%s]', $section, (string) json_encode($canonical, JSON_UNESCAPED_SLASHES));
+                if (isset($claims[$canonical])) {
+                    return [$location, 'alias is already claimed at '.$claims[$canonical]];
+                }
+                $claims[$canonical] = $location;
+                $local = [];
 
-            foreach ($entry['replaces'] as $index => $alias) {
-                $replacementLocation = sprintf('%s.replaces[%d]', $location, $index);
-                if ($alias === $canonical) {
-                    return [$replacementLocation, 'cannot replace its own alias'];
+                foreach ($entry['replaces'] as $index => $alias) {
+                    $replacementLocation = sprintf('%s.replaces[%d]', $location, $index);
+                    if ($alias === $canonical) {
+                        return [$replacementLocation, 'cannot replace its own alias'];
+                    }
+                    if (isset($local[$alias])) {
+                        return [$replacementLocation, 'duplicates '.$local[$alias]];
+                    }
+                    if (isset($claims[$alias])) {
+                        return [$replacementLocation, 'alias is already claimed at '.$claims[$alias]];
+                    }
+                    $local[$alias] = $replacementLocation;
+                    $claims[$alias] = $replacementLocation;
                 }
-                if (isset($local[$alias])) {
-                    return [$replacementLocation, 'duplicates '.$local[$alias]];
-                }
-                if (isset($claims[$alias])) {
-                    return [$replacementLocation, 'alias is already claimed at '.$claims[$alias]];
-                }
-                $local[$alias] = $replacementLocation;
-                $claims[$alias] = $replacementLocation;
             }
         }
 
@@ -290,8 +344,9 @@ final class MessageCheckCommand extends Command
             if (isset($seen[$key])) {
                 return [sprintf('.personal.keys[%d]', $index), 'must not duplicate another personal key'];
             }
-            // @infection-ignore-all; equivalent: a set, read by the `isset()` above alone, so the
+            // equivalent: a set, read by the `isset()` above alone, so the
             // value is arbitrary
+            // @infection-ignore-all
             $seen[$key] = true;
         }
 
@@ -301,7 +356,7 @@ final class MessageCheckCommand extends Command
     /**
      * @return array{string, string}|null
      */
-    private static function diagnoseEntry(mixed $entry): ?array
+    private static function diagnoseEntry(mixed $entry, bool $versioned): ?array
     {
         if (! is_array($entry)) {
             return ['', sprintf('must be a JSON object (received %s)', get_debug_type($entry))];
@@ -319,16 +374,18 @@ final class MessageCheckCommand extends Command
             return ['.class', 'cannot be blank'];
         }
 
-        if (! array_key_exists('version', $entry)) {
-            return ['.version', 'field is required'];
-        }
+        if ($versioned) {
+            if (! array_key_exists('version', $entry)) {
+                return ['.version', 'field is required'];
+            }
 
-        if (! is_int($entry['version'])) {
-            return ['.version', sprintf('must be an integer (received %s)', get_debug_type($entry['version']))];
-        }
+            if (! is_int($entry['version'])) {
+                return ['.version', sprintf('must be an integer (received %s)', get_debug_type($entry['version']))];
+            }
 
-        if ($entry['version'] < 1) {
-            return ['.version', 'must be at least 1'];
+            if ($entry['version'] < 1) {
+                return ['.version', 'must be at least 1'];
+            }
         }
 
         if (! array_key_exists('replaces', $entry)) {

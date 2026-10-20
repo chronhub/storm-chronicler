@@ -16,9 +16,11 @@ use Storm\Contracts\Chronicler\EventTypeMapper;
 use Storm\Serializer\MessageSerializer;
 
 /**
- * The relay command declares the surface an operator and a supervisor call it with: its name, a
- * batch bound defaulting to 100, and the daemon loop's options, idling 800 milliseconds between
- * empty passes.
+ * The relay command declares the surface an operator and a supervisor call it with:
+ *
+ * - Its name
+ * - A batch bound defaulting to 100
+ * - The daemon loop's options, idling 800 milliseconds between empty passes
  */
 final class RelayOutboxCommandDefinitionTest extends TestCase
 {

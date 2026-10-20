@@ -11,8 +11,9 @@ use Storm\Chronicler\Outbox\ClaimSummary;
 use Storm\Chronicler\Outbox\OutboxRow;
 
 /**
- * The claim's partitions come back as the strings the rows carry, whatever they look like: a key PHP
- * reads as an integer must not reach a string parameter as one.
+ * The claim's partitions come back as the strings the rows carry, whatever they look like.
+ *
+ * A key PHP reads as an integer must not reach a string parameter as one.
  */
 final class ClaimSummaryTest extends TestCase
 {

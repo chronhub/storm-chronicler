@@ -13,12 +13,12 @@ use Storm\Stream\StreamCategory;
 use Symfony\Component\DependencyInjection\Attribute\AsAlias;
 
 /**
- * Postgres StreamDirectory on Doctrine DBAL: a windowed SELECT over `stream_heads`, name-ordered,
- * resumable by the strict `stream > :after` lower bound.
+ * The Postgres `StreamDirectory` on Doctrine DBAL: a windowed `SELECT` over `stream_heads`.
  *
- * The category narrow matches the bare category stream OR the `category-` prefix, with LIKE
- * metacharacters escaped; a category may legitimately contain `_`, which would otherwise match
- * any character and leak a sibling lane into the browse.
+ * Rows come in name order, resumable by the strict `stream > :after` lower bound. The category narrow
+ * matches the bare category stream or the `category-` prefix, with `LIKE` metacharacters escaped: a
+ * category may legitimately contain `_`, which would otherwise match any character and leak a sibling
+ * lane into the browse.
  */
 #[AsAlias(StreamDirectory::class)]
 final readonly class DbalStreamDirectory implements StreamDirectory
@@ -35,7 +35,7 @@ final readonly class DbalStreamDirectory implements StreamDirectory
         $types = ['limit' => ParameterType::INTEGER];
 
         if ($category !== null) {
-            // the raw filter of the HTTP edge: a value that is no category under the StreamName
+            // the raw filter of the HTTP edge: a value that is no category under the `StreamName`
             // rule names a lane that cannot exist, so it browses nothing rather than erroring
             try {
                 $category = new StreamCategory($category)->value;

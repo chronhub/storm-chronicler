@@ -18,11 +18,10 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 
 /**
- * The deploy-time verdict's two exits: a clean store leaves the deploy alone, and an unreadable one
- * FAILS, since the whole point is to pay the verdict here rather than at the first read.
+ * The deploy-time verdict's two exits: a clean store leaves the deploy alone, an unreadable one fails.
  *
- * The conformance is real, only its store is a double; the SQL it issues is pinned against a live
- * table by the integration twin.
+ * Failing here pays the verdict at deploy rather than at the first read. The conformance is real and
+ * only its store is a double; the integration twin pins the SQL it issues against a live table.
  *
  * @see \Storm\Tests\Integration\Chronicler\UpcasterVerifyCommandTest
  */
@@ -93,7 +92,10 @@ final class UpcasterVerifyCommandTest extends TestCase
         $tester->execute(['--json' => true]);
 
         $this->assertSame(Command::FAILURE, $tester->getStatusCode());
-        /** @var array{conformant: bool, problems: list<string>, anomalies: list<array{type: string, floor: int, current: int|null, ceiling: int, kind: string, problem: string}>} $document */
+        /**
+         * @var array{conformant: bool, problems: list<string>, anomalies: list<array{type: string,
+         *     floor: int, current: int|null, ceiling: int, kind: string, problem: string}>} $document
+         */
         $document = json_decode($tester->getDisplay(), true, 512, JSON_THROW_ON_ERROR);
         $this->assertFalse($document['conformant']);
 
@@ -162,7 +164,9 @@ final class UpcasterVerifyCommandTest extends TestCase
     {
         return new readonly class($version) implements EventTypeMapper
         {
-            /** @param positive-int $version */
+            /**
+             * @param  positive-int  $version
+             */
             public function __construct(private int $version) {}
 
             public function toType(string $class): string
@@ -191,7 +195,9 @@ final class UpcasterVerifyCommandTest extends TestCase
         };
     }
 
-    /** An upcaster claiming exactly one `(alias, fromVersion)` step, payload untouched. */
+    /**
+     * An upcaster claiming exactly one `(alias, fromVersion)` step, payload untouched.
+     */
     private function claiming(string $alias, int $fromVersion): Upcaster
     {
         return new readonly class($alias, $fromVersion) implements Upcaster

@@ -26,13 +26,21 @@ use function sprintf;
 use function strcmp;
 
 /**
- * The batch store's contract, unit-pinned with the Connection mocked: ONE multi-VALUES dedup INSERT,
- * whose RETURNING set is the fresh ids, then N handlers inside ONE transactional() call; a duplicate,
- * an id absent from the RETURNING set or already consumed within the batch, skips its handler; a
- * throwing handler propagates so the real transaction rolls the whole batch back, though the rollback
- * itself rides the integration test; and an oversized batch chunks into several statements. The mock
- * mirrors PostgreSQL's ON CONFLICT DO NOTHING: a conflicting row, including an intra-statement
- * duplicate, is simply absent from RETURNING.
+ * The batch store's contract, unit-pinned with the `Connection` mocked:
+ *
+ * - One multi-VALUES dedup `INSERT`, whose `RETURNING` set is the fresh ids, then N handlers inside
+ *   one `transactional()` call
+ *
+ * - A duplicate, an id absent from the `RETURNING` set or already consumed within the batch, skips
+ *   its handler
+ *
+ * - A throwing handler propagates so the real transaction rolls the whole batch back; the
+ *   integration test covers the rollback itself
+ *
+ * - An oversized batch chunks into several statements
+ *
+ * The mock mirrors PostgreSQL's `ON CONFLICT DO NOTHING`: a conflicting row, including an
+ * intra-statement duplicate, is simply absent from `RETURNING`.
  */
 final class DbalBatchInboxStoreTest extends TestCase
 {
@@ -251,11 +259,12 @@ final class DbalBatchInboxStoreTest extends TestCase
     // -------------------------------------------------------------------------
 
     /**
-     * A Connection whose transactional() runs the closure inline and whose fetchFirstColumn mirrors the
-     * multi-VALUES `ON CONFLICT DO NOTHING RETURNING message_id`: positional params come as
-     * [consumer, key, consumer, key, …], the keys in hex as the store sends them; a key is returned iff
-     * $insertedFor says fresh AND it was not already
-     * inserted earlier in the same statement or batch, PostgreSQL's intra-statement DO NOTHING.
+     * A `Connection` whose `transactional()` runs the closure inline and whose `fetchFirstColumn()`
+     * mirrors the multi-VALUES `ON CONFLICT DO NOTHING RETURNING message_id`.
+     *
+     * Positional params come as `[consumer, key, consumer, key, …]`, the keys in hex as the store
+     * sends them. A key is returned only when `$insertedFor` says fresh and it was not already
+     * inserted earlier in the same statement or batch, PostgreSQL's intra-statement `DO NOTHING`.
      *
      * @param  Closure(string): bool  $insertedFor
      * @return Connection&Stub

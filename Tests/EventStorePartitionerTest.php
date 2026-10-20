@@ -54,8 +54,9 @@ final class EventStorePartitionerTest extends TestCase
     #[Test]
     public function test_an_invalid_category_raises_the_contracted_stream_exception(): void
     {
-        // the same rule as StreamName, so the same contracted exception; an SPL InvalidArgumentException
-        // escapes the package's exception surface for a value every other entry refuses as a stream fault
+        // the same rule as `StreamName`, so the same contracted exception; an SPL
+        // `InvalidArgumentException` escapes the package's exception surface for a value every other
+        // entry refuses as a stream fault
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())->method('executeStatement');
 
@@ -72,7 +73,7 @@ final class EventStorePartitionerTest extends TestCase
 
         $this->expectException(InvalidStreamException::class);
 
-        // 'Bad-Category' breaks StreamName::CATEGORY_REGEX, uppercase and hyphen, a config error.
+        // 'Bad-Category' breaks `StreamName::CATEGORY_REGEX`, uppercase and hyphen, a config error.
         new EventStorePartitioner($connection)->createPartitions(['Bad-Category']);
     }
 
@@ -80,9 +81,9 @@ final class EventStorePartitionerTest extends TestCase
     #[Group('adversarial')]
     public function it_rejects_every_metacharacter_class_a_category_could_smuggle_into_the_ddl(): void
     {
-        // the module's ONLY string-into-SQL path: the category is interpolated into DDL as both the
-        // child identifier and the LIST bound, so each hostile class must die on the allowlist, one
-        // named case per class rather than one generic invalid input
+        // the module's only string-into-SQL path: the category is interpolated into DDL as both the
+        // child identifier and the `LIST` bound, so each hostile class must be refused by the
+        // allowlist, one named case per class rather than one generic invalid input
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())->method('executeStatement');
 
@@ -147,9 +148,9 @@ final class EventStorePartitionerTest extends TestCase
     public function verify_is_false_when_the_child_exists_under_a_bound_that_admits_another_category(): void
     {
         // the arm the name above promises and the presence check alone would miss: a child carrying
-        // the right NAME and the wrong bound is attached, is a partition, and accepts none of this
+        // the right name and the wrong bound is attached, is a partition, and accepts none of this
         // category's rows. The class documents the hand recipe that produces it, a detach and
-        // reattach where the FOR VALUES clause is typed by an operator mid-incident.
+        // reattach where the `FOR VALUES` clause is typed by an operator mid-incident.
         $connection = $this->createStub(Connection::class);
         $connection->method('fetchOne')->willReturn(false);
 

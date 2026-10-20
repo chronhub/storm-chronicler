@@ -16,27 +16,27 @@ use function count;
 use function implode;
 
 /**
- * Default OutboxWriter: inserts the batch's `es_outbox` rows with ONE multi-VALUES statement per
- * {@see InsertChunk::ROWS} of entries, on the given connection, the event store's transaction, so the
- * rows commit atomically with the events.
+ * The default `OutboxWriter`, one multi-`VALUES` statement per `InsertChunk::ROWS` of entries.
  *
- * What actually carries the relay's order is the identity `id`, which it drains `ORDER BY id`, and
- * insert order is entry order, so the batch's rows take ids in event order. `position` is the event's
- * `sequence_no` captured in-TX: exact, carried for consumers and for the audit, and NOT the ordering
- * key. The two agree per partition anyway, since a stream's appends serialize on its head and each
- * batch is inserted in version order, but only one of them is what the relay reads, and a change to
- * this insert must keep the ID order faithful to event order, not merely the `position` values.
+ * The relay's order is carried by the identity `id`, which it drains `ORDER BY id`, and insert order is
+ * entry order, so the batch's rows take ids in event order. `position` is the event's `sequence_no`
+ * captured inside the transaction: exact, carried for consumers and for the audit, and not the ordering
+ * key. The two agree per partition anyway, since a stream's appends serialize on its head and each batch
+ * is inserted in version order, but the relay reads only one of them, and a change to this insert must
+ * keep the id order faithful to event order, not merely the `position` values.
  *
- * As the owner of the outbox tables it also carries their storage retention: pruning the cold
- * `es_outbox_archive` by age via `pruneArchive()`. The HOT table needs no retention at all: a
- * published row is disposed of at drain time, deleted or moved to the archive, so `es_outbox` only
- * ever holds in-flight work plus the dead-letter, which the operator path OutboxDeadLetter owns and
- * retention never touches.
+ * As the owner of the outbox tables, it also carries their storage retention: `pruneArchive()` prunes the
+ * cold `es_outbox_archive` by age. The hot table needs no retention: a published row is disposed of at
+ * drain time, deleted or moved to the archive, so `es_outbox` only ever holds in-flight work plus the
+ * dead-letter, which the operator path `OutboxDeadLetter` owns and retention never touches.
  */
 #[AsAlias(OutboxWriter::class)]
 final readonly class DbalOutboxWriter implements OutboxWriter
 {
-    /** The archive is entirely published-by-construction, prunable purely by age; the BRIN on archived_at serves this. */
+    /**
+     * The archive holds published rows only, by construction, so it is prunable by age alone; the BRIN
+     * on `archived_at` serves this.
+     */
     private const string ARCHIVE_PRUNABLE = "archived_at < now() - (CAST(:age AS bigint) * interval '1 second')";
 
     public function __construct(
@@ -91,9 +91,10 @@ final readonly class DbalOutboxWriter implements OutboxWriter
     }
 
     /**
-     * Prune the archive under `storm.outbox.disposal: archive` by age, the cold table's retention.
-     * Under `delete` disposal the archive is empty and this is a no-op. Cannot race the live relay: the
-     * relay only ever INSERTs here via the atomic move, never reads.
+     * Prune the archive by age, the cold table's retention under `storm.outbox.disposal: archive`.
+     *
+     * Under `delete` disposal the archive is empty and this is a no-op. It cannot race the live relay,
+     * which only ever inserts here through the atomic move and never reads.
      *
      * @param  positive-int  $batch
      * @return int rows pruned

@@ -20,13 +20,15 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 use Throwable;
 
 /**
- * Drains the event-store outbox: publishes pending messages, then disposes of the rows, deleted or
- * moved to es_outbox_archive per `storm.outbox.disposal`. Stays transport-neutral: it only knows
- * OutboxRelay; the actual publishing target, the event bus, is the relay's injected `OutboxPublisher`.
+ * Drains the event-store outbox: publishes pending messages, then disposes of the rows.
  *
- * One-shot by default, draining once then exiting so a scheduler re-runs it; `--daemon` keeps it up
- * and loops the drain in-process, so the framework bootstrap is paid once, not per tick, via
- * {@see \Storm\Support\Console\DaemonLoop}.
+ * The rows are deleted or moved to `es_outbox_archive` per `storm.outbox.disposal`. The command stays
+ * transport-neutral: it only knows `OutboxRelay`, and the publishing target, the event bus, is the
+ * relay's injected `OutboxPublisher`.
+ *
+ * It is one-shot by default, draining once then exiting so a scheduler re-runs it; `--daemon` keeps it
+ * up and loops the drain in-process through `DaemonLoop`, so the framework bootstrap is paid once, not
+ * per tick.
  *
  * Examples:
  *
@@ -82,7 +84,7 @@ final class RelayOutboxCommand extends Command
                 $this->drainTelemetry();
             }
         } catch (OutboxDrainIncomplete $e) {
-            // A transient publishing failure: the relay fails FORWARD; what it reports here is
+            // A transient publishing failure: the relay fails forward; what it reports here is
             // committed, namely published rows, dead-letters, the bumped back-off; the tail stays
             // pending. Show the durable progress, then signal the scheduler to retry.
             //
@@ -107,9 +109,9 @@ final class RelayOutboxCommand extends Command
         }
 
         if ($result->stalled > 0) {
-            // A stalled row is the one outcome that does NOT resolve itself: the rows are intact and
+            // A stalled row is the one outcome that does not resolve itself: the rows are intact and
             // still `pending`, but their partitions stay frozen until a deployment ships the missing
-            // upcaster or rolls this binary forward. Reporting SUCCESS here, as a dead-letter does,
+            // upcaster or rolls this binary forward. Reporting `SUCCESS` here, as a dead-letter does,
             // would tell a scheduler the egress is fine while an aggregate's is stopped, so it exits
             // non-zero: the alert must keep firing until someone deploys.
             $io->error(sprintf(
@@ -139,11 +141,11 @@ final class RelayOutboxCommand extends Command
     }
 
     /**
-     * What the drain leaves behind, on EVERY path that succeeds.
+     * What the drain leaves behind, on every path that succeeds.
      *
-     * Every succeeding path reaches it, the dead-letter one included: a bad deployment that
-     * dead-letters a full batch relays 0, and a gate that loops until a run reports 0 would read that
-     * as an empty queue, counting what LEFT and never what remains.
+     * The dead-letter path reaches it too: a bad deployment that dead-letters a full batch relays 0, and
+     * a gate that loops until a run reports 0 would read that as an empty queue, counting what left and
+     * never what remains.
      *
      * The two halves answer different questions. A full batch means the cap cut the run, so re-running
      * moves more immediately. A short batch means only that the cap did not cut it, and a table can
@@ -177,10 +179,11 @@ final class RelayOutboxCommand extends Command
     }
 
     /**
-     * The stall fragment of a drain report, empty when nothing stalled, so one sentence serves the
-     * clean outcome and the interrupted one. Naming the cause and the frozen partitions is the
-     * point: a count that says neither WHICH schema step is missing nor WHOSE egress stopped tells
-     * an operator nothing they can act on without querying `es_outbox`.
+     * The stall fragment of a drain report, empty when nothing stalled.
+     *
+     * One sentence then serves the clean outcome and the interrupted one. It names the cause and the
+     * frozen partitions, since a count that says neither which schema step is missing nor whose egress
+     * stopped tells an operator nothing they can act on without querying `es_outbox`.
      */
     private function stallClause(OutboxDrainResult $result): string
     {
@@ -207,10 +210,11 @@ final class RelayOutboxCommand extends Command
     }
 
     /**
-     * Daemon mode: boot once, loop the drain in-process until SIGTERM/SIGINT or `--time-limit`. An
-     * {@see OutboxDrainIncomplete}, a transient publish failure, is NOT fatal here: its progress is
+     * Daemon mode: boot once, loop the drain in-process until SIGTERM/SIGINT or `--time-limit`.
+     *
+     * An `OutboxDrainIncomplete`, a transient publish failure, is not fatal here: its progress is
      * committed and the relay's back-off is bumped, so the loop counts it as idle and polls before
-     * retrying the tail. Any other Throwable propagates, so the process exits non-zero and the
+     * retrying the tail. Any other `Throwable` propagates, so the process exits non-zero and the
      * supervisor respawns with back-off.
      *
      * A stall, a row this runtime cannot decode, is not fatal either, since the other partitions must
@@ -218,7 +222,7 @@ final class RelayOutboxCommand extends Command
      * the tick it happens and makes the daemon's final exit non-zero, so a supervisor's restart log
      * carries the incident instead of a clean stop.
      *
-     * @param  int<1, max>  $batch  positive, since execute() guards it before the daemon branch
+     * @param  int<1, max>  $batch  positive, since `execute()` guards it before the daemon branch
      */
     private function daemon(SymfonyStyle $io, InputInterface $input, int $batch): int
     {
@@ -233,7 +237,7 @@ final class RelayOutboxCommand extends Command
                 } finally {
                     $this->drainTelemetry();
                 }
-                // Stalled rows are NOT work: nothing moved, and counting them as a busy tick would
+                // Stalled rows are not work: nothing moved, and counting them as a busy tick would
                 // spin the loop instead of polling.
                 $work = $result->published + $result->failed;
             } catch (OutboxDrainIncomplete $e) {

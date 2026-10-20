@@ -12,10 +12,13 @@ use Storm\Stream\StreamCategory;
  * One aggregate stream's events after a version, the snapshot read path.
  *
  * `WHERE category = :category AND stream = :stream AND version > :afterVersion ORDER BY version ASC`.
- * The half-open lower bound `>` selects only the events recorded after the snapshot; ordering by
- * `version`, per-stream and contiguous, is the replay order and rides the `UNIQUE (category, stream,
- * version)` index, so there is no separate sort. `category` is included so the index is used from its
- * leading column; it equals `split_part(stream, '-', 1)`.
+ *
+ * - The half-open lower bound `>` selects only the events recorded after the snapshot.
+ *
+ * - Ordering by `version`, per stream and contiguous, is the replay order and uses the
+ *   `UNIQUE (category, stream, version)` index, so there is no separate sort.
+ *
+ * - `category`, equal to `split_part(stream, '-', 1)`, lets the index be used from its leading column.
  */
 final readonly class AggregateStreamSince implements QueryFilter
 {

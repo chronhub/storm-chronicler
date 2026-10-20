@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Evolution;
 
 /**
- * The static verdict of {@see UpcasterChain::audit()} over one alias's version steps: the two ways
- * `upcast()` fails loud at read, answered before any row is read. A value object, not a service.
+ * The static verdict of {@see UpcasterChain::audit()} over one alias's version steps.
+ *
+ * It answers, before any row is read, the two ways `upcast()` fails loud at read. A value object, not a
+ * service.
  */
 final readonly class ChainAudit
 {

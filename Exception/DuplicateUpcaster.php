@@ -10,11 +10,11 @@ use Storm\Chronicler\Evolution\UpcasterChain;
 use Storm\Contracts\Chronicler\UndecodableRow;
 
 /**
- * Two upcasters claim the same version step of the same alias. The chain's invariant is one step =
- * one upcaster: it applies exactly one transformation per version, so two candidates make the
- * migrated payload depend on service discovery order, and the losing implementation is invisible.
- * On an immutable history that is not a preference to arbitrate but a wiring error to fix, hence a
- * `LogicException` that fails fast and named.
+ * Two upcasters claim the same version step of the same alias.
+ *
+ * The chain applies exactly one upcaster per version step. Two candidates would make the migrated
+ * payload depend on service discovery order, and hide the losing implementation. On an immutable
+ * history this is a wiring error to fix, so a `LogicException` fails fast and names the claimants.
  *
  * @see UpcasterChain
  * @see Upcaster

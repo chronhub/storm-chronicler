@@ -12,9 +12,11 @@ use RecursiveIteratorIterator;
 use SplFileInfo;
 
 /**
- * The ownership boundary deptrac cannot see: the link bookkeeping belongs to the EventLinks
- * module, and Chronicler's knowledge of it would be a reverse dependency hidden in a SQL string,
- * making the declared package graph lie about the runtime ownership graph.
+ * The ownership boundary deptrac cannot see.
+ *
+ * The link bookkeeping belongs to the EventLinks module. Chronicler's knowledge of it would be a
+ * reverse dependency hidden in a SQL string, and the declared package graph would then misstate the
+ * runtime ownership graph.
  */
 final class EventLinksOwnershipTest extends TestCase
 {

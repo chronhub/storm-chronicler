@@ -21,16 +21,16 @@ use function sort;
 use function sprintf;
 
 /**
- * Default InboxStore: records `(consumer, message_id)` and runs the handler in one DBAL transaction.
+ * The default `InboxStore`: one DBAL transaction records `(consumer, message_id)` and runs the handler.
  *
  * The row carries the consumer as the two-byte id `InboxConsumers` registered for its name, and the
- * message id in the binary form `InboxKey` gives it; the pair the contract names is what the caller
+ * message id in the binary form `InboxKey` gives it: the pair the contract names is what the caller
  * passes, the pair the table stores is what a proof costs.
  *
- * `INSERT … ON CONFLICT DO NOTHING` is the dedup gate: 0 rows affected means already processed, so it
- * skips and the handler never runs. Otherwise, the handler runs inside the same transaction, so its
- * effects on the default connection and the inbox row commit together; a throw rolls both back and
- * the message is reprocessed on redelivery. Atomicity covers DB effects on this connection, not
+ * `INSERT … ON CONFLICT DO NOTHING` is the deduplication gate: 0 rows affected means already processed,
+ * so the handler never runs. Otherwise the handler runs inside the same transaction, so its effects on
+ * the default connection and the inbox row commit together, and a throw rolls both back, so the
+ * message is reprocessed on redelivery. Atomicity covers database effects on this connection, not
  * external side effects like HTTP or mail, which stay at-least-once.
  *
  * A skip is counted where it happens: the row keeps how many redeliveries it absorbed in
@@ -42,14 +42,17 @@ use function sprintf;
 final readonly class DbalInboxStore implements InboxStore
 {
     /**
-     * A key whose first 48 bits are a minting instant: sixteen bytes carrying the version nibble 7. A
-     * v4 uuid has the length and random leading bits, so the version is READ, never assumed.
+     * A key whose first 48 bits are a minting instant: sixteen bytes carrying the version nibble 7.
+     *
+     * A v4 uuid has the length and random leading bits, so the version is read, never assumed.
      */
     private const string V7_KEY = 'octet_length(message_id) = 16 AND get_byte(message_id, 6) >> 4 = 7';
 
     /**
-     * The distinct `consumer_id` values of the table, by a recursive skip along the leading column of
-     * the primary index: `SELECT DISTINCT` would walk the whole table for a handful of values.
+     * The distinct `consumer_id` values of the table, read by a recursive skip.
+     *
+     * The skip runs along the leading column of the primary index, where `SELECT DISTINCT` would walk
+     * the whole table for a handful of values.
      */
     private const string CONSUMERS_OF_THE_TABLE = <<<'SQL'
         WITH RECURSIVE s AS (
@@ -61,8 +64,9 @@ final readonly class DbalInboxStore implements InboxStore
         SQL;
 
     /**
-     * Every other key, `idem-` and hashed texts, non-v7 uuids, is prunable by age alone: its bytes say
-     * nothing of its time.
+     * Every other key is prunable by age alone, since its bytes say nothing of its time.
+     *
+     * Those keys are the `idem-` and hashed texts and the non-v7 uuids.
      */
     private const string PRUNABLE_BY_AGE = "NOT (octet_length(message_id) = 16 AND get_byte(message_id, 6) >> 4 = 7) AND processed_at < now() - (CAST(:age AS bigint) * interval '1 second')";
 
@@ -79,7 +83,7 @@ final readonly class DbalInboxStore implements InboxStore
      */
     public function once(string $consumer, string $messageId, Closure $handler): bool
     {
-        // resolved BEFORE the transaction: a first registration then autocommits and can be cached,
+        // resolved before the transaction: a first registration then autocommits and can be cached,
         // where one made inside the handler's transaction would vanish with its rollback
         $consumerId = $this->consumers->id($consumer);
         $key = InboxKey::encode($messageId);
@@ -87,7 +91,7 @@ final readonly class DbalInboxStore implements InboxStore
         return $this->connection->transactional(
             function (Connection $tx) use ($consumerId, $key, $consumer, $messageId, $handler): bool {
                 $inserted = $tx->executeStatement(
-                    // the conflict target is NAMED: only the dedup key may absorb a violation into
+                    // the conflict target is named: only the dedup key may absorb a violation into
                     // "already processed"; any future constraint on the table stays loud
                     /* language=PostgreSQL */
                     'INSERT INTO es_inbox (consumer_id, message_id) VALUES (:consumer, :message_id)
@@ -136,8 +140,10 @@ final readonly class DbalInboxStore implements InboxStore
     }
 
     /**
-     * The dedup records older than `$ageSeconds`: the v7 keys below the bound of that instant, by the
-     * primary index over every consumer the table holds, plus the other keys by their `processed_at`.
+     * Counts the deduplication records older than `$ageSeconds`.
+     *
+     * The v7 keys count below the bound of that instant, through the primary index over every consumer
+     * the table holds, and the other keys by their `processed_at`.
      *
      * @throws InvalidInboxRetention when the age is negative or predates the Unix epoch
      * @throws Exception on a DBAL failure
@@ -162,23 +168,24 @@ final readonly class DbalInboxStore implements InboxStore
     }
 
     /**
-     * Prune the dedup records older than `$ageSeconds`, in `$batch`-capped statements so it never holds
-     * a long lock.
+     * Prune the deduplication records older than `$ageSeconds`, in `$batch`-capped statements.
      *
-     * A v7 key carries its minting instant in its first 48 bits, so the retention is a RANGE of the
-     * primary index per consumer, walked with a cursor: each batch starts after the last key the
-     * previous one deleted, at the frontier of what remains, rather than at the bound where the entries
-     * of the rows already gone sit dead until vacuum. PostgreSQL marks a dead entry the first time a
-     * scan meets it, so the cursor spares reads rather than a rising cost; a row that `SKIP LOCKED`
-     * passed over and that sorts below the cursor waits for the next call, the purge being idempotent.
-     * The consumers come from the table itself, read by a skip through the leading column of the
-     * primary index, so a proof recorded under an id the registry lost is purged all the same and a
-     * call that finds nothing to delete reads a few index pages, never the table. The keys of another
-     * shape, few, go by age.
+     * The cap keeps every lock short. A v7 key carries its minting instant in its first 48 bits, so the
+     * retention is a range of the primary index per consumer, walked with a cursor: each batch starts
+     * after the last key the previous one deleted, at the frontier of what remains, rather than at the
+     * bound where the entries of the rows already gone sit dead until vacuum. PostgreSQL marks a dead
+     * entry the first time a scan meets it, so the cursor spares reads rather than a rising cost; a row
+     * that `SKIP LOCKED` passed over and that sorts below the cursor waits for the next call, the purge
+     * being idempotent.
      *
-     * The retention counts from the MINTING instant, not the consumption: a message consumed after a
-     * queue lag is retired lag earlier than its `processed_at` says, so `$ageSeconds` must exceed the
-     * redelivery window PLUS the longest queue lag.
+     * The consumers come from the table itself, read by a skip through the leading column of the primary
+     * index, so a proof recorded under an id the registry lost is purged all the same, and a call that
+     * finds nothing to delete reads a few index pages, never the table. The keys of another shape, few,
+     * go by age.
+     *
+     * The retention counts from the minting instant, not the consumption: a message consumed after a
+     * queue lag is retired that lag earlier than its `processed_at` says, so `$ageSeconds` must exceed the
+     * redelivery window plus the longest queue lag.
      *
      * @param  positive-int  $batch
      * @return int rows pruned
@@ -220,8 +227,9 @@ final readonly class DbalInboxStore implements InboxStore
     }
 
     /**
-     * The v7 floor of the instant `$ageSeconds` ago, read on the database clock so the retention and
-     * the rows' own timestamps agree.
+     * The v7 floor of the instant `$ageSeconds` ago, on the database clock.
+     *
+     * Reading the database clock makes the retention and the rows' own timestamps agree.
      *
      * @throws InvalidInboxRetention when the age is negative or predates the Unix epoch
      * @throws Exception on a DBAL failure

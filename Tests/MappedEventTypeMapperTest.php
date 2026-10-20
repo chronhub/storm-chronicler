@@ -9,7 +9,10 @@ use PHPUnit\Framework\TestCase;
 use Storm\Chronicler\Evolution\MappedEventTypeMapper;
 use Storm\Chronicler\Exception\DuplicateEventAlias;
 use Storm\Chronicler\Exception\UnknownEventType;
+use Storm\Chronicler\Tests\Fixture\AliasedCommand;
 use Storm\Chronicler\Tests\Fixture\AliasedEvent;
+use Storm\Chronicler\Tests\Fixture\BothSortsMessage;
+use Storm\Chronicler\Tests\Fixture\CommandClaimingEventAlias;
 use Storm\Chronicler\Tests\Fixture\DuplicateAliasEvent;
 use Storm\Chronicler\Tests\Fixture\PreAliasEvent;
 use Storm\Chronicler\Tests\Fixture\RenamedEvent;
@@ -101,11 +104,14 @@ final class MappedEventTypeMapperTest extends TestCase
     {
         // a query may name an event class since deleted; reflection cannot load it, so the memoized
         // lookup answers null, no attribute to read, and the stored type is the bare string, no crash.
+        // The query still holds the name as a class-string, written while the class existed
+        /** @var class-string $deleted */
+        $deleted = self::deletedClassName();
         $mapper = new MappedEventTypeMapper;
 
-        $this->assertSame('App\\DeletedEvent', $mapper->toType('App\\DeletedEvent'));
-        $this->assertSame(['App\\DeletedEvent'], $mapper->storedTypesOf('App\\DeletedEvent'));
-        $this->assertSame(1, $mapper->versionOf('App\\DeletedEvent'));
+        $this->assertSame('App\\DeletedEvent', $mapper->toType($deleted));
+        $this->assertSame(['App\\DeletedEvent'], $mapper->storedTypesOf($deleted));
+        $this->assertSame(1, $mapper->versionOf($deleted));
     }
 
     #[Test]
@@ -134,12 +140,47 @@ final class MappedEventTypeMapperTest extends TestCase
         // The FQCN is the one source that can repeat: the attribute refuses a self-replacing alias
         // and a duplicated replacement, but it never sees the class it decorates, so an author who
         // lists the type the pre-alias rows carry names what the mapper appends anyway. The result
-        // feeds an IN clause, which a repeat would widen for nothing.
+        // feeds an `IN` clause, which a repeat would widen for nothing.
         $mapper = new MappedEventTypeMapper([PreAliasEvent::class]);
 
         $this->assertSame(
             ['test.pre_alias', PreAliasEvent::class],
             $mapper->storedTypesOf(PreAliasEvent::class),
         );
+    }
+
+    private static function deletedClassName(): string
+    {
+        return 'App\\DeletedEvent';
+    }
+
+    #[Test]
+    public function to_class_resolves_an_alias_declared_by_command_type(): void
+    {
+        $mapper = new MappedEventTypeMapper([AliasedCommand::class]);
+
+        self::assertSame('test.charge', $mapper->toType(AliasedCommand::class));
+        self::assertSame(AliasedCommand::class, $mapper->toClass('test.charge'));
+        self::assertSame(AliasedCommand::class, $mapper->toClass('test.charge.v0'));
+        self::assertSame(1, $mapper->versionOf(AliasedCommand::class));
+    }
+
+    #[Test]
+    public function the_constructor_rejects_one_alias_shared_by_an_event_and_a_command(): void
+    {
+        $this->expectException(DuplicateEventAlias::class);
+        $this->expectExceptionMessageIsOrContains(CommandClaimingEventAlias::class);
+
+        new MappedEventTypeMapper([AliasedEvent::class, CommandClaimingEventAlias::class]);
+    }
+
+    #[Test]
+    public function the_constructor_rejects_a_class_declaring_both_sorts(): void
+    {
+        // the refusal names the class and both aliases, so the author sees which two declarations collide
+        $this->expectException(DuplicateEventAlias::class);
+        $this->expectExceptionMessageMatches('/BothSortsMessage.*"test\.both".*"test\.both\.command"/');
+
+        new MappedEventTypeMapper([BothSortsMessage::class]);
     }
 }

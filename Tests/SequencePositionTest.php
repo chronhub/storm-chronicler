@@ -36,8 +36,8 @@ final class SequencePositionTest extends TestCase
     #[Test]
     public function the_ordinal_and_the_string_render_the_same_value(): void
     {
-        // the two contracted forms of one fact: toOrdinal() is what the checkpoint schema persists,
-        // toString() its decimal rendering; diverging would let the freshness math and the outbox
+        // the two contracted forms of one fact: `toOrdinal()` is what the checkpoint schema persists,
+        // `toString()` its decimal rendering; diverging would let the freshness math and the outbox
         // payload disagree about the same position
         $position = SequencePosition::fromInt(42);
 
@@ -159,8 +159,8 @@ final class SequencePositionTest extends TestCase
     #[Group('adversarial')]
     public function from_int_rejects_zero(): void
     {
-        // every factory holds the invariant, not only the string one; a zero position would ride
-        // as a "valid" VO until some read explodes far from the bug
+        // every factory holds the invariant, not only the string one; a zero position would pass as
+        // a "valid" VO until some read fails far from the bug
         $this->expectException(InvalidPosition::class);
 
         SequencePosition::fromInt(0);

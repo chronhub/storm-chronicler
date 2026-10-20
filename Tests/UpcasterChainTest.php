@@ -62,7 +62,7 @@ final class UpcasterChainTest extends TestCase
     #[Test]
     public function audit_names_the_missing_steps_without_reading_a_row(): void
     {
-        // the deploy-time half of MissingUpcaster: the gap is named statically, before any read pays it
+        // the deploy-time half of `MissingUpcaster`: the gap is named statically, before any read pays it
         $chain = new UpcasterChain([
             $this->upcaster('order.placed', 1, fn (array $p): array => $p), // only v1 to v2
         ]);
@@ -182,7 +182,7 @@ final class UpcasterChainTest extends TestCase
     #[Test]
     public function a_second_upcaster_on_another_step_of_the_same_alias_is_not_a_duplicate(): void
     {
-        // the guard must catch a contested STEP, not a busy alias: a chain of consecutive steps is
+        // the guard must catch a contested step, not a busy alias: a chain of consecutive steps is
         // the normal shape of an event migrated more than once
         $chain = new UpcasterChain([
             $this->upcaster('order.placed', 1, fn (array $p): array => [...$p, 'currency' => 'EUR']),
@@ -199,19 +199,19 @@ final class UpcasterChainTest extends TestCase
     #[Group('adversarial')]
     public function an_upcaster_that_throws_is_wrapped_naming_the_service_and_the_step(): void
     {
-        // A user upcaster's own TypeError must not escape raw: raw, the outbox relay cannot tell it
-        // from an infrastructure crash, so it would roll back the whole batch and crash-loop the
-        // daemon instead of stalling the one row. And the bare "null given" names neither the
-        // service that is wrong nor the event it choked on; the wrap does both, cause preserved.
+        // a user upcaster's own `TypeError` must not escape raw: the outbox relay cannot tell it from
+        // an infrastructure crash, so it would roll back the whole batch and crash-loop the daemon
+        // instead of stalling the one row. The bare "null given" also names neither the faulty
+        // service nor the event it failed on; the wrap names both and keeps the cause.
         $chain = new UpcasterChain([new ThrowingUpcaster]);
 
         try {
             $chain->upcast('test.upcast', 1, 2, ['amount' => 100]);
             $this->fail('expected the throwing upcaster to be wrapped');
         } catch (UpcasterFailed $e) {
-            $this->assertStringContainsString(ThrowingUpcaster::class, $e->getMessage()); // WHICH service
-            $this->assertStringContainsString('test.upcast', $e->getMessage());           // WHICH event
-            $this->assertStringContainsString('from version 1 to 2', $e->getMessage());   // WHICH step
+            $this->assertStringContainsString(ThrowingUpcaster::class, $e->getMessage()); // which service
+            $this->assertStringContainsString('test.upcast', $e->getMessage());           // which event
+            $this->assertStringContainsString('from version 1 to 2', $e->getMessage());   // which step
             $previous = $e->getPrevious();
             $this->assertInstanceOf(TypeError::class, $previous); // the original fault, for the audit digest
             $this->assertStringContainsString('null given', $previous->getMessage());
@@ -222,8 +222,8 @@ final class UpcasterChainTest extends TestCase
     #[Group('adversarial')]
     public function a_stored_version_newer_than_the_runtime_is_refused_loud(): void
     {
-        // the mirror asymmetry would be silent: loud on the past, MissingUpcaster, zero
-        // iterations on the FUTURE; a rolled-back binary reading a newer row would get the payload
+        // the mirror asymmetry would be silent: loud on the past, `MissingUpcaster`, zero
+        // iterations on the future; a rolled-back binary reading a newer row would get the payload
         // unchanged, handed to a codec that may hydrate it partially
         $this->expectException(UnsupportedFutureEventVersion::class);
 
@@ -234,7 +234,7 @@ final class UpcasterChainTest extends TestCase
     #[Group('adversarial')]
     public function a_probe_that_throws_is_wrapped_naming_the_service_and_the_step(): void
     {
-        // supports() runs user code too: a probe that throws must join the same typed lane as a
+        // `supports()` runs user code too: a probe that throws must join the same typed lane as a
         // failed migration, or the relay reads it as an infrastructure crash and rolls back the
         // whole batch over one broken service
         $probe = $this->throwingProbe();
@@ -244,9 +244,9 @@ final class UpcasterChainTest extends TestCase
             $chain->upcast('test.probe', 1, 2, ['amount' => 100]);
             $this->fail('expected the throwing probe to be wrapped');
         } catch (UpcasterFailed $e) {
-            $this->assertStringContainsString($probe::class, $e->getMessage());   // WHICH service
-            $this->assertStringContainsString('test.probe', $e->getMessage());    // WHICH event
-            $this->assertStringContainsString('version 1', $e->getMessage());     // WHICH step
+            $this->assertStringContainsString($probe::class, $e->getMessage());   // which service
+            $this->assertStringContainsString('test.probe', $e->getMessage());    // which event
+            $this->assertStringContainsString('version 1', $e->getMessage());     // which step
             $this->assertStringContainsString('probe exploded', (string) $e->getPrevious()?->getMessage());
         }
     }
@@ -261,7 +261,9 @@ final class UpcasterChainTest extends TestCase
         new UpcasterChain([$this->throwingProbe()])->audit('test.probe', 1, 2);
     }
 
-    /** An upcaster whose probe itself fails: `supports()` throws before answering. */
+    /**
+     * An upcaster whose probe itself fails: `supports()` throws before answering.
+     */
     private function throwingProbe(): Upcaster
     {
         return new class() implements Upcaster

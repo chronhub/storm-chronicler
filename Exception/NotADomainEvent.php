@@ -10,11 +10,11 @@ use Storm\Contracts\Chronicler\ChroniclerExceptionContract;
 use Storm\Contracts\Message\DomainEvent;
 
 /**
- * An EventRecord was read whose envelope does not wrap a DomainEvent.
+ * An `EventRecord` was read whose envelope does not wrap a `DomainEvent`.
  *
- * The event store stores domain events exclusively, so a record always carries one. This signals
- * a corrupt read or a misuse, an envelope built by hand with a non-event message; fail fast
- * rather than hand back something that isn't a domain event.
+ * The event store holds domain events only, so a record always carries one. This signals a corrupt read
+ * or a misuse, such as an envelope built by hand around a non-event message, and fails fast instead of
+ * handing back something that is not a domain event.
  */
 final class NotADomainEvent extends RuntimeException implements ChroniclerExceptionContract
 {

@@ -9,9 +9,14 @@ use Storm\Contracts\Serializer\CipherKeyStore;
 use Storm\Contracts\Serializer\SubjectForgotten;
 
 /**
- * In-memory cipher keys for the unit suite: real 32-byte material, so the sodium calls under test
- * are the REAL ones and only the persistence is faked, with the port's whole verdict surface:
- * issue-idempotent, tombstoned-refuses, destroyed-vs-never-issued distinguishable.
+ * In-memory cipher keys for the unit suite, covering the port's whole verdict surface:
+ *
+ * - `issue()` is idempotent
+ * - A tombstoned subject refuses
+ * - Destroyed and never issued are distinguishable
+ *
+ * The material is real 32-byte key material, so the sodium calls under test are the real ones and
+ * only the persistence is faked.
  */
 final class FakeCipherKeyStore implements CipherKeyStore
 {

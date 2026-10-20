@@ -12,7 +12,9 @@ final class RecordingSafeHeadObserver implements SafeHeadObservability
     /** @var list<SafeHeadCrossingContext> */
     public array $seen = [];
 
-    /** @return list<SafeHeadCrossingContext> */
+    /**
+     * @return list<SafeHeadCrossingContext>
+     */
     public function observations(): array
     {
         return $this->seen;

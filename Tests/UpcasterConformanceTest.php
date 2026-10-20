@@ -23,17 +23,20 @@ use Storm\Serializer\DefaultMessageSerializer;
 use Throwable;
 
 /**
- * The pure half of the readability conformance, one verdict family per stored-type shape: an
- * undeclared stored type, a stored type resolving to a loadable class that is not a domain event,
- * rows above the runtime's version, a chain gap between the data-computed floor and the current
- * version, a duplicate step owner, and the clean pass, including the reset-posture case where the
- * floor equals the current version and no upcaster is needed at all.
+ * The pure half of the readability conformance, one verdict family per stored-type shape:
  *
- * The parity case at the bottom is what makes the rest mean anything: a verdict is a claim ABOUT the
- * read path, made by a class that does not call it, so the two agreeing is a coincidence until
- * something holds it. The store's rows are built from a real domain event for the same reason; the
- * placeholder they carried resolved to a class the read path refuses outright, which pinned the one
- * verdict this check exists to prevent, a store full of unreadable rows reported conformant.
+ * - An undeclared stored type
+ * - A stored type resolving to a loadable class that is not a domain event
+ * - Rows above the runtime's version
+ * - A chain gap between the data-computed floor and the current version
+ * - A duplicate step owner
+ * - The clean pass, with the reset posture: floor at the current version, no upcaster needed
+ *
+ * The parity case at the bottom gives the rest its meaning: a verdict is a claim about the read
+ * path, made by a class that does not call it, so the two agreeing is a coincidence until something
+ * holds it. The store's rows are built from a real domain event for the same reason: a placeholder
+ * resolving to a class the read path refuses outright would pin the one verdict this check exists to
+ * prevent, a store full of unreadable rows reported conformant.
  */
 final class UpcasterConformanceTest extends TestCase
 {
@@ -155,8 +158,8 @@ final class UpcasterConformanceTest extends TestCase
     #[Test]
     public function a_renamed_alias_audits_the_canonical_chain_the_runtime_will_call(): void
     {
-        // rows stored under a replaced alias resolve to the class whose CANONICAL alias the read
-        // path hands to the chain; the audit must poll that same alias or its verdict lies
+        // rows stored under a replaced alias resolve to the class whose canonical alias the read
+        // path hands to the chain; the audit must poll that same alias or its verdict is false
         $conformance = new UpcasterConformance($this->renamedMapper('order.placed.legacy', 'order.placed', 2), new UpcasterChain([
             $this->claiming('order.placed', 1),
         ]));
@@ -169,7 +172,7 @@ final class UpcasterConformanceTest extends TestCase
     #[Test]
     public function an_upcaster_left_on_the_replaced_alias_is_reported_missing(): void
     {
-        // the mirror lie: a chain claiming only the OLD alias would be approved while the runtime,
+        // the mirror error: a chain claiming only the old alias would be approved while the runtime,
         // which polls the canonical one, never calls it; the verdict names both aliases
         $conformance = new UpcasterConformance($this->renamedMapper('order.placed.legacy', 'order.placed', 2), new UpcasterChain([
             $this->claiming('order.placed.legacy', 1),
@@ -196,7 +199,7 @@ final class UpcasterConformanceTest extends TestCase
 
         $problems = $conformance->verdicts([
             ['type' => SomethingHappened::class, 'floor' => 1, 'ceiling' => 2, 'n' => 1],
-            // a second stored type AFTER the faulty one: its verdict must still be judged, the
+            // a second stored type after the faulty one: its verdict must still be judged, the
             // broken probe ends one type's verdict, never the audit
             ['type' => 'Not\\A\\Real\\Class', 'floor' => 1, 'ceiling' => 1, 'n' => 3],
         ]);
@@ -210,7 +213,7 @@ final class UpcasterConformanceTest extends TestCase
     #[Test]
     public function names_a_stored_type_resolving_to_a_loadable_class_that_is_not_a_domain_event(): void
     {
-        // a restore or import artifact: the class LOADS, so the resolution succeeds and every
+        // a restore or import artifact: the class loads, so the resolution succeeds and every
         // version rule below it reads clean, while the read path refuses the row before hydrating it
         $conformance = new UpcasterConformance($this->mapperAt(1), new UpcasterChain);
 
@@ -239,9 +242,12 @@ final class UpcasterConformanceTest extends TestCase
     }
 
     /**
-     * Every stored-row shape whose verdict is expressible with a mapper of one version step: the
-     * stored type, the version the row carries, the version the runtime knows, and how many
-     * upcasters claim the single step between them, zero being a gap and two a duplicate.
+     * Every stored-row shape whose verdict is expressible with a mapper of one version step:
+     *
+     * - The stored type
+     * - The version the row carries
+     * - The version the runtime knows
+     * - How many upcasters claim the single step between them, zero being a gap and two a duplicate
      *
      * @return iterable<string, array{string, int, positive-int, int}>
      */
@@ -266,8 +272,8 @@ final class UpcasterConformanceTest extends TestCase
     {
         // the promise of a deploy-time verdict, stated as an equality: a store this calls conformant
         // is a store the read path can drain, and a store it condemns is one that would really fail.
-        // Neither class calls the other, so nothing but this holds the two sets equal, and they had
-        // already diverged on the one shape whose class loads and is refused anyway.
+        // Neither class calls the other, so nothing but this holds the two sets equal, and a class
+        // that loads yet is refused is where they part.
         $mapper = $this->mapperAt($current);
         $chain = new UpcasterChain(array_fill(0, $claimants, $this->claiming(SomethingHappened::class, 1)));
 
@@ -302,7 +308,9 @@ final class UpcasterConformanceTest extends TestCase
     {
         return new readonly class($version) implements EventTypeMapper
         {
-            /** @param positive-int $version */
+            /**
+             * @param  positive-int  $version
+             */
             public function __construct(private int $version) {}
 
             public function toType(string $class): string
@@ -341,7 +349,9 @@ final class UpcasterConformanceTest extends TestCase
     {
         return new readonly class($legacy, $canonical, $version) implements EventTypeMapper
         {
-            /** @param positive-int $version */
+            /**
+             * @param  positive-int  $version
+             */
             public function __construct(
                 private string $legacy,
                 private string $canonical,
@@ -374,7 +384,9 @@ final class UpcasterConformanceTest extends TestCase
         };
     }
 
-    /** An upcaster whose probe itself fails: `supports()` throws before answering. */
+    /**
+     * An upcaster whose probe itself fails: `supports()` throws before answering.
+     */
     private function throwingProbe(): Upcaster
     {
         return new class() implements Upcaster
@@ -391,7 +403,9 @@ final class UpcasterConformanceTest extends TestCase
         };
     }
 
-    /** An upcaster claiming exactly one `(alias, fromVersion)` step, payload untouched. */
+    /**
+     * An upcaster claiming exactly one `(alias, fromVersion)` step, payload untouched.
+     */
     private function claiming(string $alias, int $fromVersion): Upcaster
     {
         return new readonly class($alias, $fromVersion) implements Upcaster

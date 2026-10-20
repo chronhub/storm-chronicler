@@ -9,15 +9,17 @@ use Doctrine\DBAL\Query\QueryBuilder;
 use Storm\Stream\StreamCategory;
 
 /**
- * One aggregate stream's events from its first version up to an inclusive target, the historical
- * inspection read path.
+ * One aggregate stream's events up to an inclusive version, the historical inspection read path.
  *
  * `WHERE category = :category AND stream = :stream AND version <= :upToVersion ORDER BY version ASC
- * LIMIT :upToVersion`. Versions within a stream are unique and contiguous from 1, so the target is
- * also the row count and the LIMIT bounds the result set in SQL, not in PHP: an event appended past
- * the target after the caller observed the head can never enter the read. Ordering by `version`
- * rides the `UNIQUE (category, stream, version)` index, and `category` keeps its leading column and
- * partition pruning, as in `AggregateStreamSince`.
+ * LIMIT :upToVersion`.
+ *
+ * - Versions within a stream are unique and contiguous from 1, so the target is also the row count,
+ *   and `LIMIT` bounds the result set in SQL rather than in PHP: an event appended past the target
+ *   after the caller observed the head can never enter the read.
+ *
+ * - Ordering by `version` uses the `UNIQUE (category, stream, version)` index, and `category` keeps
+ *   its leading column and partition pruning, as in `AggregateStreamSince`.
  */
 final readonly class AggregateStreamUpTo implements QueryFilter
 {

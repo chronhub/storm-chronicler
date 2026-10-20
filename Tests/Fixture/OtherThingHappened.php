@@ -7,8 +7,9 @@ namespace Storm\Chronicler\Tests\Fixture;
 use Storm\Contracts\Message\DomainEvent;
 
 /**
- * A second fixture event type, alongside SomethingHappened, so tests can exercise type
- * filtering; the stored `type` column differs by event class.
+ * A second fixture event type, alongside `SomethingHappened`, so tests can exercise type filtering.
+ *
+ * The stored `type` column differs by event class.
  *
  * @see SomethingHappened
  */

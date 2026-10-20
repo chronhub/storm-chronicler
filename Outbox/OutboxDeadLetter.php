@@ -10,13 +10,24 @@ use Doctrine\DBAL\ParameterType;
 use Storm\Chronicler\Console\OutboxFailedCommand;
 
 /**
- * Inspect and recover the outbox dead-letter, `status = 'failed'`: list the dead-lettered rows,
- * requeue them to `pending` for the relay to republish, or purge them. Owns the `es_outbox`
- * dead-letter SQL so the {@see OutboxFailedCommand} stays pure presentation. This is the operator
- * path, off the hot relay loop, a separate seam from {@see DbalOutboxWriter}, which only ever appends.
+ * Inspects and recovers the outbox dead-letter, `status = 'failed'`.
  *
- * The page methods bound collective inspection and recovery. The id-based methods act on the whole
+ * It lists the dead-lettered rows, requeues them to `pending` for the relay to republish, or purges
+ * them, and owns the `es_outbox` dead-letter SQL so {@see OutboxFailedCommand} stays pure
+ * presentation. This is the operator path, off the hot relay loop, a seam separate from
+ * {@see DbalOutboxWriter}, which only ever appends.
+ *
+ * The page methods bound collective inspection and recovery; the id-based methods act on the whole
  * dead-letter when passed `null`.
+ *
+ * @phpstan-type FailedRow array{
+ *     id: int|string,
+ *     position: int|string,
+ *     type: string,
+ *     attempts: int|string,
+ *     last_error: ?string,
+ *     failed_at: ?string,
+ * }
  */
 final readonly class OutboxDeadLetter
 {
@@ -36,7 +47,7 @@ final readonly class OutboxDeadLetter
     {
         [$where, $params, $types] = $this->scope($id);
 
-        /** @var list<array{id: int|string, position: int|string, type: string, attempts: int|string, last_error: ?string, failed_at: ?string}> $rows */
+        /** @var list<FailedRow> $rows */
         $rows = $this->connection->fetchAllAssociative(
             /* language=PostgreSQL */
             'SELECT id, position, type, attempts, last_error, failed_at FROM es_outbox '.$where.' ORDER BY id',
@@ -48,12 +59,11 @@ final readonly class OutboxDeadLetter
     }
 
     /**
-     * One keyset page of the dead-letter, the rows whose id is strictly greater than `$afterId`,
-     * in the same drain order.
+     * One keyset page of the dead-letter, the rows with an id strictly above `$afterId`, in drain order.
      *
-     * `listFailed()` answers a console that renders whatever it is handed; a page answers a caller
-     * that cannot be trusted to ask for little, so the cap rides the SQL instead of a slice taken
-     * once the whole dead-letter is already in memory.
+     * `listFailed()` answers a console that renders whatever it is handed; a page answers a caller that
+     * cannot be trusted to ask for little, so the cap goes into the SQL instead of a slice taken once the
+     * whole dead-letter is already in memory.
      *
      * @param  non-negative-int  $afterId  zero starts at the first row, ids being one-based
      * @param  positive-int  $limit  rows at most, the caller having already clamped it
@@ -63,7 +73,7 @@ final readonly class OutboxDeadLetter
      */
     public function listFailedPage(int $afterId, int $limit): array
     {
-        /** @var list<array{id: int|string, position: int|string, type: string, attempts: int|string, last_error: ?string, failed_at: ?string}> $rows */
+        /** @var list<FailedRow> $rows */
         $rows = $this->connection->fetchAllAssociative(
             /* language=PostgreSQL */
             "SELECT id, position, type, attempts, last_error, failed_at FROM es_outbox WHERE status = 'failed' AND id > :after ORDER BY id LIMIT :limit",
@@ -75,8 +85,10 @@ final readonly class OutboxDeadLetter
     }
 
     /**
-     * Requeue the dead-letter to `pending` so the relay republishes it, clearing every terminal marker,
-     * `attempts`, `last_error`, `next_attempt_at`, and `failed_at`, so the row looks pristine.
+     * Requeue the dead-letter to `pending` so the relay republishes it.
+     *
+     * It clears every terminal marker, `attempts`, `last_error`, `next_attempt_at` and `failed_at`, so the
+     * row looks pristine.
      *
      * @return int rows requeued
      *
@@ -137,9 +149,10 @@ final readonly class OutboxDeadLetter
     }
 
     /**
-     * How many rows the same scope would act on, without loading them: what a destructive command
-     * must be able to state BEFORE it asks for confirmation, since "purge?" and "purge 12 000 rows,
-     * the only record of why they failed?" are not the same question.
+     * How many rows the same scope would act on, without loading them.
+     *
+     * A destructive command must be able to state it before asking for confirmation, since "purge?" and
+     * "purge 12 000 rows, the only record of why they failed?" are not the same question.
      *
      * @throws Exception on a DBAL read failure
      */
@@ -175,7 +188,7 @@ final readonly class OutboxDeadLetter
     }
 
     /**
-     * @param  list<array{id: int|string, position: int|string, type: string, attempts: int|string, last_error: ?string, failed_at: ?string}>  $rows
+     * @param  list<FailedRow>  $rows
      * @return list<FailedOutboxMessage>
      */
     private function toMessages(array $rows): array

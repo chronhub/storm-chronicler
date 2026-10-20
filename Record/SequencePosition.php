@@ -9,13 +9,13 @@ use Storm\Chronicler\Exception\InvalidPosition;
 use Storm\Contracts\Chronicler\Position;
 
 /**
- * The default Position: a monotonic int64, the `event_store.sequence_no` column, assigned at
- * append by a Postgres identity sequence. Not strictly dense: an aborted append burns its
- * reserved positions, and the safe-head classifies those gaps as permanent. Its string form is
- * the integer in base 10, stable and ordering-preserving, which is what travels in the outbox.
+ * The default `Position`: the `event_store.sequence_no` column, assigned at append.
  *
- * Comparisons assume one position type per store; mixing implementations is a bug and raises
- * InvalidPosition.
+ * A Postgres identity sequence assigns it, with gaps: an aborted append burns its reserved positions,
+ * and the safe head classifies those gaps as permanent. The base-10 string form is stable and keeps
+ * the order, and it is what travels in the outbox.
+ *
+ * Comparisons assume one position type per store; mixing implementations is a bug.
  */
 final readonly class SequencePosition implements Position
 {
@@ -27,9 +27,9 @@ final readonly class SequencePosition implements Position
     ) {}
 
     /**
-     * @throws InvalidPosition when `$value` is not a positive integer: the invariant every factory
-     *                         holds, not only the string one; a zero or negative position would ride
-     *                         as a "valid" VO until some read explodes far from the bug
+     * @throws InvalidPosition when `$value` is not a positive integer, the invariant every factory
+     *                         holds and not only the string one; a zero or negative position would
+     *                         travel as a valid-looking value object until a read fails far from the bug
      */
     public static function fromInt(int $value): self
     {

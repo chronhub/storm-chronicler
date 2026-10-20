@@ -17,84 +17,83 @@ use Storm\Contracts\Chronicler\Position;
 use Throwable;
 
 /**
- * Computes the commit-order safe head, the highest position a filtered catch-up reader may pass
- * without risking a skip, and ratchets a persisted floor so the computation stays cheap.
+ * Computes the commit-order safe head and ratchets a persisted floor so the computation stays cheap.
  *
- * `sequence_no` is reserved at INSERT, but transactions commit out of order, so the head can show a
- * high position while a lower one is still in-flight. Instead of a snapshot-horizon watermark, which
- * missed invisible in-flight rows and skipped them, this scans the actual `sequence_no` gaps and
- * stops below the first young one: a gap is either an abort, stepped over, or an in-flight insert,
- * waited on, told apart by a grace window on the upper neighbor's `recorded_at`, stamped by the same
- * INSERT. The result is the lower edge of the lowest young gap, else the committed head.
+ * The safe head is the highest position a filtered catch-up reader may pass without risking a skip.
+ * `sequence_no` is reserved at `INSERT`, but transactions commit out of order, so the head can show a
+ * high position while a lower one is still in flight. A snapshot-horizon watermark would miss invisible
+ * in-flight rows and skip them; this scans the actual `sequence_no` gaps and stops below the first
+ * young one. A gap is an abort, stepped over, or an in-flight insert, waited on, and a grace window on
+ * the upper neighbor's `recorded_at`, stamped by the same `INSERT`, tells them apart. The result is the
+ * lower edge of the lowest young gap, else the committed head.
  *
- * The scan is correct from any floor; `advance()` ratchets `event_store_high_water` forward,
- * monotone, only to keep the tail short, while `compute()` never writes, so the read stays pure and
- * always-correct even with no ratchet. Under N daemons `tick()` elects ONE writer per cycle via an
- * advisory lock: the winner scans and ratchets, the rest read the floor, which is conservative, at
- * or below the true head, so a reader never skips.
+ * The scan is correct from any floor. `advance()` ratchets `event_store_high_water` forward, monotone,
+ * only to keep the tail short, while `compute()` never writes, so the read stays pure and correct with
+ * no ratchet at all. Under several daemons, `tick()` elects one writer per cycle.
  *
- * The grace test has no upper time bound. Normal appends omit `recorded_at`, leaving it to the
- * database default `clock_timestamp()`. A backward server clock step can make a neighbor appear
- * future-dated; explicit SQL outside the append contract can supply such a timestamp too. The gap
- * stays young until the neighbor has aged beyond the grace relative to the server clock. An upper
- * bound would exclude that neighbor and permit a skip over positions still in flight. `compute()`
- * and `advance()` share this conservative predicate.
+ * The grace test has no upper time bound. Normal appends leave `recorded_at` to the database default
+ * `clock_timestamp()`, but a backward server clock step can make a neighbor appear future-dated, and
+ * explicit SQL outside the append contract can supply such a timestamp too. The gap stays young until
+ * the neighbor has aged beyond the grace relative to the server clock; an upper bound would exclude
+ * that neighbor and permit a skip over positions still in flight. `compute()` and `advance()` share
+ * this conservative predicate.
  *
- * Accepted residual, and the reason this is a grace-bounded watermark rather than an exact one: a
- * transaction that reserves a `sequence_no` then stays in-flight past the grace is presumed aborted
- * and stepped over, then commits below the cursor and is skipped, permanently and silently. Storm
- * appends commit in milliseconds, and four measured runs, chaos included, saw zero holes and zero
- * grace stall, so the residual does not bite at any load tested here; the grace, wired from
- * `storm.safe_head.grace_seconds`, is the knob.
+ * The watermark is grace-bounded rather than exact, which leaves an accepted residual: a transaction
+ * that reserves a `sequence_no`, then stays in flight past the grace, is presumed aborted and stepped
+ * over, then commits below the cursor and is skipped, permanently and silently. Storm appends commit in
+ * milliseconds, and measured runs, chaos included, saw neither a hole nor a grace stall at any tested
+ * load; the grace, wired from `storm.safe_head.grace_seconds`, is the knob.
  *
- * Making the presumption mechanically true takes a writer-side `transaction_timeout` strictly under
- * the grace, so no append can outlive its own presumption of abort. NOT
- * `idle_in_transaction_session_timeout`: that one terminates a session sitting IDLE inside a
- * transaction and does nothing about one that is busy, which a slow append is; it narrows the window
- * without closing it. Both are session/role settings PostgreSQL cannot be made to carry from here,
- * and `transaction_timeout` is connection-wide, so a value under the grace also bounds the projection
- * batches and the installer's DDL riding that connection: a deployment decision, not a boot guard.
- * {@see SafeHeadPrecondition} is what reports whether the deployment took it, and `storm:install`
- * surfaces that reading, so nobody learns it from a read-model that quietly lost an event.
+ * Making the presumption mechanically true takes a writer-side `transaction_timeout` strictly under the
+ * grace, so no append can outlive its own presumption of abort. `idle_in_transaction_session_timeout`
+ * only narrows the window: it ends a session sitting idle inside a transaction and leaves a busy one,
+ * which a slow append is.
+ *
+ * Both are session or role settings that PostgreSQL cannot be made to carry from here, and
+ * `transaction_timeout` is connection-wide, so a value under the grace also bounds the projection
+ * batches and the installer's DDL on that connection: a deployment decision, not a boot guard.
+ * {@see SafeHeadPrecondition} reports whether the deployment took it, and `storm:install` surfaces that
+ * reading, so nobody learns it from a read model that quietly lost an event.
  *
  * @see PostgresEventStore::safeHeadPosition()
- * @see EventStoreSchema  the `sequence_no` index this scan rides and the `event_store_high_water` cursor
+ * @see EventStoreSchema  the `sequence_no` index this scan uses and the `event_store_high_water` cursor
  */
 final class SafeHeadAdvancer
 {
     /**
-     * The `WITH` body shared by compute and advance: derives `w.watermark` from the live gap scan
-     * above `$floor`. `:grace` is the number of seconds an unfilled gap is treated as possibly
-     * in-flight before being presumed aborted.
+     * The shared `WITH` body of `compute()` and `advance()`, deriving `w.watermark` from the gap scan.
      *
-     * The floor is inlined as a literal, not read via a `floor_pos` CTE, nor bound as a `:floor`
-     * parameter. Both hide the value from the planner, which then falls back to the default `>`
-     * selectivity, a third of the table, and estimates a huge `tail`: the cost crosses
-     * `jit_above_cost`, so JIT compiles the query every cycle for what is, in a steady state,
-     * near-zero work. A literal lets the planner read the histogram, estimate the real tiny tail, and
-     * skip JIT, while still enabling it on a genuinely large backlog, where it earns its keep. A bound
-     * parameter is worse than useless here: it estimates right under a custom plan but reverts to the
-     * bad estimate once the statement goes generic after a few executions. `$floor` is the trusted
-     * `event_store_high_water.position`, never user input.
+     * The scan runs live above `$floor`, and `:grace` is the number of seconds an unfilled gap is
+     * treated as possibly in flight before it is presumed aborted.
+     *
+     * The floor is inlined as a literal rather than read through a `floor_pos` CTE or bound as a
+     * `:floor` parameter. Both alternatives hide the value from the planner, which falls back to the
+     * default `>` selectivity, a third of the table, and estimates a huge `tail`: the cost crosses
+     * `jit_above_cost`, so JIT compiles the query every cycle for what is near-zero work in a steady
+     * state. A literal lets the planner read the histogram, estimate the real, tiny tail and skip JIT,
+     * while still enabling it on a genuinely large backlog where it pays off. A bound parameter
+     * estimates right under a custom plan but reverts to the bad estimate once the statement goes
+     * generic after a few executions.
+     *
+     * `$floor` is the trusted `event_store_high_water.position`, never user input.
      */
     private static function watermarkCtes(int $floor, ?int $window = null): string
     {
-        // The bound, when the caller sets one, closes BOTH the tail and the fallback: a tail read up
-        // to floor + W with a fallback still reading the global head would step over a young gap
-        // sitting above the window, for good. With the fallback capped at floor + W the watermark
-        // never passes what the scan has seen, and a gap above the window is found by a later ratchet.
+        // a caller's bound closes both the tail and the fallback: a tail read up to floor + W with a
+        // fallback still reading the global head would step over a young gap above the window, for
+        // good. Capped at floor + W, the watermark never passes what the scan has seen, and a later
+        // ratchet finds a gap above the window.
         $ceiling = $window === null ? '' : sprintf(' AND e.sequence_no <= %d', $floor + $window);
-        // A gap is judged young by its UPPER neighbor, and a gap straddling the top of the window has
-        // that neighbor above it. Without it the scan ends on the last row of the window, or on the
-        // anchor alone when the window holds no row, sees no gap, and the fallback lifts the floor
-        // over positions nothing examined. The first committed row above the window joins `tail`,
-        // one index probe: a young straddling gap holds the watermark below it, an old one is
-        // stepped over by the capped fallback.
+        // a gap is judged young by its upper neighbor, which lies above the window for a gap
+        // straddling its top. Without that neighbor the scan ends on the window's last row, or on the
+        // anchor alone in an empty window, sees no gap, and the fallback lifts the floor over positions
+        // nothing examined. So the first committed row above the window joins `tail`, one index probe:
+        // a young straddling gap holds the watermark below it, the capped fallback steps an old one over.
         $beyond = $window === null ? '' : sprintf(
             ' UNION ALL (SELECT e.sequence_no, e.recorded_at FROM event_store e WHERE e.sequence_no > %d ORDER BY e.sequence_no LIMIT 1)',
             $floor + $window,
         );
-        // `LEAST` ignores a NULL argument, so capping the head of an EMPTY store would answer the
+        // `LEAST` ignores a `NULL` argument, so capping the head of an empty store would answer the
         // cap itself: a watermark over no row, and a floor climbing one window per ratchet above the
         // positions the first events are about to take. The cap applies to a head that exists.
         $fallback = $window === null
@@ -137,19 +136,23 @@ final class SafeHeadAdvancer
     }
 
     /**
-     * The current ratcheted floor, 0 when never ratcheted or the store is empty, read on its own
-     * query so it can be inlined into the gap scan as a planner-visible literal.
+     * The current ratcheted floor, 0 when never ratcheted or when the store is empty.
      *
-     * Splitting the read from the scan opens a window the single-statement `floor_pos` CTE did not
-     * have: a concurrent ratchet can lift the floor between this read and the scan. It is
-     * correctness-safe on every path. The unbounded scan of `compute()` yields the same watermark
-     * from any floor at or below it; a lower floor only lengthens the scanned tail, never changes
-     * the result. The bounded scan of `ratchet()` yields a watermark that depends on the floor, at
-     * most `RATCHET_WINDOW` above it: a lower floor gives a LOWER watermark, conservative, so a stale
-     * floor never causes a skip there either, it costs one more ratchet. On the `tick()` path the
-     * advisory-lock winner is the sole writer, so the floor cannot move at all. On the unlocked
-     * `compute()` path, for waiters and one-shot runners, the floor can be up to one ratchet stale,
-     * so the tail may be marginally longer; it self-heals on the next read.
+     * It is read on its own query so it can be inlined into the gap scan as a planner-visible literal.
+     * That split opens a window a single-statement `floor_pos` CTE would not have: a concurrent ratchet
+     * can lift the floor between this read and the scan. Every path stays correct:
+     *
+     * - The unbounded scan of `compute()` yields the same watermark from any floor at or below it; a
+     *   lower floor only lengthens the scanned tail, never changes the result.
+     *
+     * - The bounded scan of `ratchet()` yields a watermark at most `RATCHET_WINDOW` above the floor, and
+     *   a lower floor gives a lower, conservative watermark: a stale floor costs one more ratchet, never
+     *   a skip.
+     *
+     * - On the `tick()` path the advisory-lock winner is the sole writer, so the floor cannot move.
+     *
+     * - On the unlocked `compute()` path, for waiters and one-shot runners, the floor can be up to one
+     *   ratchet stale, so the tail may be marginally longer until the next read.
      *
      * @throws Exception on a DBAL failure of the singleton read
      */
@@ -169,14 +172,16 @@ final class SafeHeadAdvancer
     private const string WRITER_LOCK_KEY = 'storm.safe_head.writer';
 
     /**
-     * How many rows above the floor one ratchet reads at most. Every row of the tail costs a heap
-     * block, `recorded_at` living in no index, so an unbounded ratchet under a flood paid the whole
-     * distance floor to head on every tick, thirteen thousand blocks a call. The bound caps the
-     * call; it also caps how far one ratchet can advance, so the floor keeps up with the writers
-     * only while `RATCHET_WINDOW × ratchets per second` exceeds the append rate: the measured flood
-     * appends 6 500 rows a second under 21 elected ratchets a second, and 2 000 leaves a sixfold
-     * margin. A floor that stops keeping up shows as a growing lag of the catch-up watermark, never
-     * as a skip. The pure read never bounds itself: it has no floor to advance and returns the head.
+     * How many rows above the floor one ratchet reads at most.
+     *
+     * Every row of the tail costs a heap block, since `recorded_at` lives in no index, so an unbounded
+     * ratchet under a flood would pay the whole distance from floor to head on every tick. The bound
+     * caps the call and also how far one ratchet can advance: the floor keeps up with the writers only
+     * while `RATCHET_WINDOW` times the ratchets per second exceeds the append rate, and this value
+     * leaves a margin of several times over the measured flood rate. A floor that falls behind shows
+     * as a growing lag of the catch-up watermark, never as a skip.
+     *
+     * The pure read never bounds itself: it has no floor to advance and returns the head.
      */
     public const int RATCHET_WINDOW = 2000;
 
@@ -189,8 +194,7 @@ final class SafeHeadAdvancer
     ) {}
 
     /**
-     * The safe head right now: a pure read recomputed from the live store, never writing. Correct
-     * regardless of the ratcheted floor.
+     * The safe head right now, a pure read recomputed from the live store.
      *
      * @throws Exception on a DBAL failure of the gap scan
      */
@@ -206,17 +210,23 @@ final class SafeHeadAdvancer
     }
 
     /**
-     * Compute the safe head over at most `RATCHET_WINDOW` rows above the floor and ratchet the
-     * persisted floor to it, returning the freshly computed head; a tail longer than the window is
-     * climbed one window per ratchet. The upsert is conditional on `WHERE position < EXCLUDED.position`, so an idle cycle writes
-     * nothing, no hot-row MVCC churn on the singleton; it is monotone, and a NULL watermark on an empty
-     * store leaves the floor untouched. Runs inside the caller's batch transaction where one is
-     * active on this connection, a rollback then undoing the ratchet; under a read-model store
-     * split it runs in `tick()`'s own short transaction and survives a batch rollback, harmless
-     * either way, since the floor is conservative and monotone, an optimization, never a
+     * Computes the safe head over at most `RATCHET_WINDOW` rows and ratchets the persisted floor to it.
+     *
+     * It returns the freshly computed head; a tail longer than the window is climbed one window per
+     * ratchet.
+     *
+     * - The upsert is conditional on `WHERE position < EXCLUDED.position`, so an idle cycle writes
+     *   nothing and the singleton sees no hot-row MVCC churn; it is monotone, and a `NULL` watermark on
+     *   an empty store leaves the floor untouched.
+     *
+     * - It runs inside the caller's batch transaction when one is active on this connection, and a
+     *   rollback then undoes the ratchet. Under a read-model store split it runs in `tick()`'s own short
+     *   transaction and survives a batch rollback.
+     *
+     * Either way is harmless, since the floor is conservative and monotone: an optimization, never a
      * correctness input.
      *
-     * @throws Exception on a DBAL failure of the gap scan / ratchet
+     * @throws Exception on a DBAL failure of the gap scan or the ratchet
      */
     public function advance(): ?Position
     {
@@ -281,26 +291,26 @@ final class SafeHeadAdvancer
     }
 
     /**
-     * One catch-up cycle's safe head with at most one daemon scanning. A transaction-scoped advisory
-     * lock, `pg_try_advisory_xact_lock`, non-blocking, elects the writer: the winner runs `advance()`
-     * to scan and ratchet, every other daemon runs `read()` for the O(1) floor with no scan,
-     * collapsing both the N-way tuple lock on the singleton AND the N-way gap scan onto a single daemon
-     * per cycle. The winner holds the lock until the caller's batch transaction settles, then the next
-     * cycle re-elects. A loser never waits; it reads the conservative floor, at or below the true head
-     * so it cannot skip, and is at most one cycle behind. Called once per catch-up cycle in place of a
-     * bare `advance()`.
+     * One catch-up cycle's safe head, with at most one daemon scanning.
      *
-     * @throws Exception on a DBAL failure of the lock probe / gap scan / floor read
+     * A transaction-scoped, non-blocking advisory lock, `pg_try_advisory_xact_lock`, elects the writer:
+     * the winner runs the scan and ratchet of `advance()`, and every other daemon runs `read()`, with no
+     * scan and no wait. Both the N-way tuple lock on the singleton and the N-way gap scan collapse onto
+     * one daemon per cycle. The winner holds the lock until the caller's batch transaction settles, then
+     * the next cycle re-elects.
+     *
+     * Called once per catch-up cycle in place of a bare `advance()`.
+     *
+     * @throws Exception on a DBAL failure of the lock probe, the gap scan or the floor read
      */
     public function tick(): ?Position
     {
-        // Under a read-model store split the batch transaction lives on the OTHER connection and
-        // this one sits in autocommit: the transaction-scoped advisory lock would acquire and
-        // release inside its own statement, every daemon would win the election every cycle, and
-        // the N-way scan contention the election exists to collapse would come back. A dedicated
-        // short transaction restores the exclusion for the scan-and-ratchet; in the un-split
-        // wiring a transaction is already active and this branch never runs, the lock holding to
-        // the batch commit as before.
+        // under a read-model store split the batch transaction lives on the other connection and
+        // this one is in autocommit: the transaction-scoped lock would acquire and release inside its
+        // own statement, every daemon would win every cycle, and the scan contention the election
+        // collapses would return. A dedicated short transaction restores the exclusion; in the
+        // un-split wiring a transaction is already active, this branch never runs, and the lock
+        // holds to the batch commit.
         $this->observation = null;
         if (! $this->connection->isTransactionActive()) {
             $position = $this->connection->transactional(fn (): ?Position => $this->winsWriterLock() ? $this->ratchet(true) : $this->read());
@@ -314,10 +324,12 @@ final class SafeHeadAdvancer
     }
 
     /**
-     * The last ratcheted floor: an O(1) singleton read with no gap scan, the watermark every
-     * non-writer daemon consumes each cycle via `tick()`. Conservative, at or below the true safe head
-     * so never a skip, at most one writer-cycle behind, and NULL until the first ratchet, since it
-     * reflects the floor, not the live store. A fresh per-daemon scan stays available via `compute()`.
+     * The last ratcheted floor, an O(1) singleton read with no gap scan.
+     *
+     * It is the watermark every non-writer daemon consumes each cycle through `tick()`: conservative,
+     * at or below the true safe head so never a skip, and at most one writer cycle behind. It is `null`
+     * until the first ratchet, since it reflects the floor rather than the live store; `compute()` still
+     * gives a fresh scan per daemon.
      *
      * @throws Exception on a DBAL failure of the singleton read
      */
@@ -332,10 +344,10 @@ final class SafeHeadAdvancer
     }
 
     /**
-     * True for the at-most-one daemon that may ratchet this cycle. `pg_try_advisory_xact_lock` is
-     * non-blocking, so a loser returns false immediately with no wait, and transaction-scoped,
-     * released when the caller's batch transaction commits or rolls back, including a deadlock-retry
-     * rollback, after which the next attempt simply re-elects.
+     * True for the one daemon, at most, that may ratchet this cycle.
+     *
+     * A loser returns false at once. The lock is released when the caller's batch transaction commits
+     * or rolls back, a deadlock-retry rollback included, after which the next attempt re-elects.
      *
      * @throws Exception on a DBAL failure of the lock probe
      */

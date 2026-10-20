@@ -12,19 +12,20 @@ use function is_numeric;
 use function sprintf;
 
 /**
- * The registry of consumer names behind `es_inbox.consumer_id`: a transport name is registered the
- * first time a proof is recorded under it and never again, so each proof carries two bytes of
- * consumer rather than the name repeated on every row.
+ * The registry of consumer names behind `es_inbox.consumer_id`.
+ *
+ * A transport name is registered the first time a proof is recorded under it and never again, so each
+ * proof carries two bytes of consumer rather than the name repeated on every row.
  *
  * The lookup runs once per name per process: the id is read from the cache, then from the table, and
  * an unknown name is inserted. The insert is `ON CONFLICT DO UPDATE ... RETURNING`, so two processes
  * registering the same name at once both get the one id.
  *
- * The cache holds COMMITTED ids only. A lookup made while a transaction is open on the connection
- * returns the id but does not cache it: had the insert ridden that transaction and the transaction
+ * The cache holds committed ids only. A lookup made while a transaction is open on the connection
+ * returns the id but does not cache it: had the insert joined that transaction and the transaction
  * rolled back, the cached id would name a row that no longer exists, the next proofs would be written
  * under it, and a later registration would mint a second id for the same name, splitting the
- * deduplication in two. The stores therefore resolve the consumer BEFORE opening their transaction,
+ * deduplication in two. The stores therefore resolve the consumer before opening their transaction,
  * where the insert autocommits, and a caller that is itself inside a transaction pays one read per
  * proof until it commits.
  */
@@ -64,8 +65,8 @@ final class InboxConsumers
         }
 
         // `$id` is numeric past the first test, and a numeric string compares with 1 as its number, so
-        // dropping the `(int)` here is an equivalent mutant, left unignored on purpose: the comparison
-        // and the disjunction on this line are killed, and an ignore would mask them
+        // dropping the `(int)` here is an equivalent mutant, left without an ignore: the comparison and
+        // the disjunction on this line are killed, and an ignore would mask them
         if (! is_numeric($id) || (int) $id < 1) {
             throw new LogicException(sprintf('The inbox registry answered no id for consumer "%s".', $consumer));
         }

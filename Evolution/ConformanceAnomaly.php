@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Evolution;
 
 /**
- * One verdict of the readability conformance, typed: which stored type this binary cannot fully
- * read, at which versions, and in which way. A value object, not a service.
+ * One typed verdict of the readability conformance.
+ *
+ * It says which stored type this binary cannot fully read, at which versions, and in which way. A value
+ * object, not a service.
  *
  * The kind is what a deployment gate acts on, and the two repairs it separates are opposite moves:
  * rows above the runtime want the binary rolled forward, a step with no upcaster wants it held back

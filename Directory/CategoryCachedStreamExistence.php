@@ -11,29 +11,34 @@ use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
- * Category-level cache over StreamExistence, where the caching boundary IS the method boundary: only
- * `hasCategory` answers are remembered, the exact `hasStream` probe stays live on every call, its
- * key space unbounded and erasure revoking per-stream positives.
+ * Caches the category-level answers of `StreamExistence`, per process.
  *
- * What is remembered, per process: the set of categories confirmed alive, stable knowledge since
- * categories are code-level concepts born at a deployment, plus each confirmed-absent category,
- * bounded by a short TTL. The golden rule is never a durable false negative: an unknown category is
- * always confirmed live before answering, and a remembered negative expires on its own, so a
- * category born after the negative is seen at most one TTL later.
+ * Only `hasCategory()` answers are remembered:
  *
- * `hasStream` never rides the cache, not even the negative category gate: a negative remembered
- * before a category's FIRST stream would otherwise serve a stale `false` for the exact question
- * until the TTL, breaking read-your-writes right after an append. The exact probe is one PK read;
- * the gate would save almost nothing and cost the port's own rule. A confirmed stream feeds the
- * category back into the positive set for free. Erasure may hollow a category: the eraser decorator
- * evicts its CATEGORY positive so the next `hasCategory` re-confirms; the eviction is per-process
- * and does not cross workers, assumed since erasure is a dev/test path by contract. A drop, restore
- * or partition detach performed OUTSIDE Storm leaves a stale positive with no bound: the cache
- * trusts Storm-driven erasure alone, and a worker recycle is the reset; the stale answer costs a
- * consumer one empty read, never a wrong durable decision.
+ * - The categories confirmed alive, stable knowledge since categories are code-level concepts born at
+ *   a deployment
  *
- * In worker mode the state lives with the process, boot-once; in a one-shot CLI process it dies
- * with it, a no-op, not a defect.
+ * - Each category confirmed absent, until a short TTL expires
+ *
+ * The rule is never a durable false negative: an unknown category is always confirmed live before
+ * answering, and a remembered negative expires on its own, so a category born after the negative is
+ * seen at most one TTL later.
+ *
+ * `hasStream()` never uses the cache, not even the negative category gate: a negative remembered before
+ * a category's first stream would serve a stale `false` for the exact question until the TTL, breaking
+ * read-your-writes right after an append. The exact probe is one primary-key read, so the gate would
+ * save almost nothing and cost the port's own rule. A confirmed stream feeds its category back into
+ * the positive set for free.
+ *
+ * Erasure may hollow a category: the eraser decorator evicts the category's positive so the next
+ * `hasCategory()` re-confirms. The eviction is per process and does not cross workers, accepted since
+ * erasure is a dev and test path by contract. A drop, restore or partition detach performed outside
+ * Storm leaves a stale positive with no bound: the cache trusts Storm-driven erasure alone, and a
+ * worker recycle resets it. The stale answer costs a consumer one empty read, never a wrong durable
+ * decision.
+ *
+ * In worker mode the state lives with the process, booted once; in a one-shot CLI process it dies with
+ * the process, which costs nothing.
  *
  * @see StreamExistence the contract, and where the two questions are told apart
  * @see CacheEvictingStreamEraser the erasure-side eviction
@@ -41,9 +46,11 @@ use Storm\Stream\StreamName;
 final class CategoryCachedStreamExistence implements StreamExistence
 {
     /**
-     * Hard cap on remembered negatives: a flood of DISTINCT garbage categories, hostile 404 probing,
-     * must not grow the map unbounded in a worker that lives for days. The positive set needs no cap;
-     * only a real append can put a category there, and categories are code-level concepts.
+     * Hard cap on remembered negatives.
+     *
+     * A flood of distinct garbage categories, hostile 404 probing, must not grow the map without bound
+     * in a worker that lives for days. The positive set needs no cap: only a real append can put a
+     * category there, and categories are code-level concepts.
      */
     private const int MAX_REMEMBERED_NEGATIVES = 1000;
 
@@ -65,13 +72,13 @@ final class CategoryCachedStreamExistence implements StreamExistence
 
     public function hasStream(StreamName $streamName): bool
     {
-        // ALWAYS the live probe, the port's rule kept to the letter. A remembered-absent category
-        // must never answer for the exact stream: the category may have been born by a first append
-        // right after the negative was cached, and this call is exactly how a caller would find out.
+        // always the live probe, the port's rule kept to the letter: a remembered-absent category must
+        // never answer for the exact stream, since a first append may have created the category right
+        // after the negative was cached, and this call is how a caller would find out
         $exists = $this->inner->hasStream($streamName);
 
         if ($exists) {
-            $this->remember($streamName->category); // an existing stream proves its category alive
+            $this->remember($streamName->category->value); // an existing stream proves its category alive
         }
 
         return $exists;
@@ -116,7 +123,8 @@ final class CategoryCachedStreamExistence implements StreamExistence
 
     private function remember(string $category): void
     {
-        // @infection-ignore-all; equivalent: a set, read by `isset()` alone, so the value is arbitrary
+        // equivalent: a set, read by `isset()` alone, so the value is arbitrary
+        // @infection-ignore-all
         $this->alive[$category] = true;
 
         unset($this->absentUntil[$category]);

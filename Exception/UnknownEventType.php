@@ -9,16 +9,15 @@ use Storm\Contracts\Chronicler\UndecodableRow;
 use Storm\Contracts\Chronicler\UnknownEventType as UnknownEventTypeContract;
 
 /**
- * A stored type can't be resolved to a class: it is neither a registered alias nor a loadable FQCN,
- * or it is loadable and not a domain event.
+ * A stored type that resolves to no domain event class.
  *
- * The two causes call for opposite dispositions, so each carries its own through
- * `resolvableByAnotherRuntime()`.
- * An unresolved alias is usually a wiring or DEPLOYMENT state, the `#[EventType]` scan not run or a
- * binary older than the row it is reading, and a corrected runtime clears it on its own; a loadable
- * class that is not a domain event will never decode, whatever ships next. A classifier that reads
- * the type alone routes both down one lane, and dead-lettering the first breaks its aggregate's
- * order over a condition that resolves itself.
+ * The two causes take opposite dispositions, so each factory sets its own:
+ *
+ * - `cannotResolve()`: the type is neither a registered alias nor a loadable FQCN, usually because the
+ *   `#[EventType]` scan did not run or the binary is older than the row. A corrected runtime clears it.
+ *
+ * - `notAnEvent()`: the type loads a class that is not a domain event, which never decodes, whatever
+ *   ships next.
  */
 final class UnknownEventType extends RuntimeException implements UndecodableRow, UnknownEventTypeContract
 {
@@ -32,7 +31,7 @@ final class UnknownEventType extends RuntimeException implements UndecodableRow,
     /**
      * {@inheritDoc}
      *
-     * The one implementation that answers per INSTANCE: true for an alias this runtime does not
+     * The one implementation that answers per instance: true for an alias this runtime does not
      * declare, false for a class it loads and refuses.
      */
     public function resolvableByAnotherRuntime(): bool
@@ -50,9 +49,10 @@ final class UnknownEventType extends RuntimeException implements UndecodableRow,
     }
 
     /**
-     * The stored type resolves to a loadable class that is not a domain event: the store holds
-     * domain events exclusively, so the row was not written by this application, a restore or
-     * import artifact, and hydrating it would instantiate an arbitrary payload class.
+     * The stored type resolves to a loadable class that is not a domain event.
+     *
+     * The store holds domain events only, so this application did not write the row: it is a restore
+     * or import artifact, and hydrating it would instantiate an arbitrary payload class.
      */
     public static function notAnEvent(string $type, string $class): self
     {

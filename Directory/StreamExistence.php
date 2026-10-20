@@ -10,19 +10,24 @@ use Storm\Stream\StreamCategory;
 use Storm\Stream\StreamName;
 
 /**
- * Read-only existence port over the store: does this exact stream exist, does this category hold
- * at least one stream. A module-local port, like StreamHeadStore: pure signatures, a DB-agnostic
- * seam, though the default implementation is Postgres.
+ * Read-only existence port: whether an exact stream exists, and whether a category holds any stream.
  *
- * Two deliberately distinct questions that legitimately diverge. `hasStream` answers for the exact
- * name, so a bare category names the category stream itself and `order` can be false while `order-*`
- * streams exist. `hasCategory` answers liveness: at least one stream, bare or qualified, lives in
- * the category. Exact existence is authoritative through the stream-heads registry: both append
- * paths create the head inside the store's transaction and the eraser removes events and head
- * atomically, so a stream exists exactly when its head row does.
+ * It is a module-local port, like `StreamHeadStore`: pure signatures, a database-agnostic seam, though
+ * the default implementation is Postgres.
  *
- * The caching boundary follows the method boundary: per-stream answers must never be cached, their
- * key space unbounded and erasure revoking positives, so `hasStream` is always live; category-level
+ * The two questions are distinct and legitimately diverge:
+ *
+ * - `hasStream()` answers for the exact name, so a bare category names the category stream itself,
+ *   and `order` can be false while `order-*` streams exist.
+ *
+ * - `hasCategory()` answers liveness: at least one stream, bare or qualified, lives in the category.
+ *
+ * Exact existence is authoritative through the stream-heads registry: both append paths create the
+ * head inside the store's transaction and the eraser removes events and head atomically, so a stream
+ * exists exactly when its head row does.
+ *
+ * The caching boundary follows the method boundary. Per-stream answers must never be cached, their key
+ * space unbounded and erasure revoking positives, so `hasStream()` is always live; category-level
  * answers are the sanctioned cache seam, served by an opt-in decorator.
  *
  * @see StreamHeadStore the registry behind the exact question

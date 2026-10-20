@@ -9,11 +9,14 @@ use Storm\Chronicler\Evolution\UpcasterChain;
 use Storm\Contracts\Chronicler\UndecodableRow;
 
 /**
- * A stored event carries a schema version NEWER than the runtime knows: an older binary is reading
- * rows a newer one wrote, from a rollback or a mid-rolling-deployment read. The chain can upcast the
- * past, never downcast the future; handing the future payload to the codec unchanged would at best
- * explode late and at worst hydrate partially in silence. A deployment condition to resolve, by
- * rolling forward or stopping the old binary; hence a `LogicException` that fails fast and named.
+ * A stored event carries a schema version newer than the runtime knows.
+ *
+ * An older binary is reading rows a newer one wrote, after a rollback or during a rolling deployment.
+ * The chain can upcast the past, never downcast the future; handing the future payload to the codec
+ * unchanged would at best fail late and at worst hydrate partially in silence.
+ *
+ * It is a deployment condition, resolved by rolling forward or stopping the old binary, so a
+ * `LogicException` fails fast and names both versions.
  *
  * @see UpcasterChain
  */

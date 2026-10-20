@@ -18,23 +18,24 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
- * Create/verify per-category LIST partitions of `event_store`, splitting a known category out of the
- * `event_store_default` catch-all into its own child with a bounded physical name.
+ * Creates and verifies the per-category `LIST` partitions of `event_store`.
  *
- * Categories come from config, never the CLI: `storm.event_store_partition_list`, the explicit,
- * DDD-known set, and, when `storm.autodiscover_partition_per_category` is on, the categories of the
- * registered aggregates, a convenience, NOT best practice, since a partition is not necessarily an
- * aggregate.
+ * It splits a known category out of the `event_store_default` catch-all into its own child, with a
+ * bounded physical name. Categories come from config, never the CLI: `storm.event_store_partition_list`,
+ * the explicit set the domain knows, and, when `storm.autodiscover_partition_per_category` is on, the
+ * categories of the registered aggregates, a convenience rather than best practice, since a partition is
+ * not necessarily an aggregate.
  *
- * `--verify-only` checks each child exists and is attached with the right LIST bound, creating
- * nothing. Otherwise, it adopts correctly bound children or creates missing partitions, then
+ * `--verify-only` checks that each child exists and is attached with the right `LIST` bound, creating
+ * nothing. Otherwise the command adopts correctly bound children or creates missing partitions, then
  * verifies.
  *
- * Postgres REJECTS a simple split when `event_store_default` still holds the category's rows; it does
- * not migrate them. So a category with DEFAULT volume is refused and marked NEEDS MIGRATION, not
- * auto-migrated: the command prints the manual recipe the operator runs, which creates a standalone
- * table, moves the rows, then ATTACHes it under an ACCESS EXCLUSIVE lock. Provision EARLY, while the
- * DEFAULT is empty; in a design that provisioned its categories up front, this never fires.
+ * Postgres rejects a simple split when `event_store_default` still holds the category's rows, and does
+ * not migrate them. So a category with rows in the default partition is refused and marked
+ * `NEEDS MIGRATION` rather than migrated: the command prints the manual recipe the operator runs, which
+ * creates a standalone table, moves the rows, then attaches it under an `ACCESS EXCLUSIVE` lock.
+ * Provision early, while the default is empty; when the categories are provisioned up front, this never
+ * fires.
  *
  * Examples:
  *
@@ -48,7 +49,11 @@ final class EventStorePartitionCommand extends Command
 {
     /**
      * @param  list<string>  $partitionList
-     * @param  array<class-string, array{id: class-string<AggregateIdentity>, category: string, snapshot?: array{threshold: int, max_age_seconds?: int|null, min_interval_seconds?: int|null}}>  $aggregates
+     * @param  array<class-string, array{
+     *     id: class-string<AggregateIdentity>,
+     *     category: string,
+     *     snapshot?: array{threshold: int, max_age_seconds?: int|null, min_interval_seconds?: int|null},
+     * }>  $aggregates
      */
     public function __construct(
         private readonly EventStorePartitioner $partitioner,
@@ -72,7 +77,7 @@ final class EventStorePartitionCommand extends Command
      * {@inheritDoc}
      *
      * @throws RuntimeException when a partition name is occupied or cannot fit the server limit
-     * @throws Exception on a DBAL failure of a create / verify / count
+     * @throws Exception on a DBAL failure of a create, a verify or a count
      */
     #[Override]
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -83,8 +88,9 @@ final class EventStorePartitionCommand extends Command
         $categories = $this->resolveCategories();
 
         if ($categories === []) {
-            // Partitioning is opt-in: with nothing configured, every category stays in event_store_default.
-            // A no-op, not an error, so the command is safe to call unconditionally from an installation step.
+            // Partitioning is opt-in: with nothing configured, every category stays in
+            // `event_store_default`, a no-op rather than an error, so the command is safe to call
+            // unconditionally from an installation step.
             $io->info('No partition categories configured (storm.event_store_partition_list / autodiscover_partition_per_category) — every category uses event_store_default.');
 
             return Command::SUCCESS;
@@ -119,9 +125,11 @@ final class EventStorePartitionCommand extends Command
     }
 
     /**
-     * Create the category's partition with a simple `CREATE TABLE … PARTITION OF`. Returns false when
-     * the DEFAULT still holds the category's rows, since Postgres rejects the split there, so the
-     * command prints the manual migration recipe instead of attempting a doomed creation.
+     * Create the category's partition with a simple `CREATE TABLE … PARTITION OF`.
+     *
+     * Returns false when the default partition still holds the category's rows, since Postgres rejects
+     * the split there, so the command prints the manual migration recipe instead of attempting a doomed
+     * creation.
      *
      * @throws RuntimeException when a partition name is occupied or cannot fit the server limit
      * @throws Exception on a DBAL failure
@@ -146,9 +154,11 @@ final class EventStorePartitionCommand extends Command
     }
 
     /**
-     * The manual split the operator runs when a category already has DEFAULT volume: stage a standalone
-     * table, move the rows out of the DEFAULT, then ATTACH it as the partition. One transaction, ACCESS
-     * EXCLUSIVE on the parent at ATTACH; the parent's partitioned PK, UNIQUE, and index attach with it.
+     * The manual split the operator runs when a category already has rows in the default partition.
+     *
+     * It stages a standalone table, moves the rows out of the default, then attaches it as the partition,
+     * in one transaction with `ACCESS EXCLUSIVE` on the parent at `ATTACH`; the parent's partitioned
+     * primary key, unique constraint and index attach with it.
      *
      * @throws RuntimeException when the partition name cannot fit the server limit
      * @throws Exception on a DBAL failure
@@ -159,8 +169,8 @@ final class EventStorePartitionCommand extends Command
 
         return implode("\n", [
             '  BEGIN;',
-            // INCLUDING CONSTRAINTS is load-bearing: without it the child misses the parent's
-            // CHECK constraint event_store_cat_stream_chk and the ATTACH is refused.
+            // `INCLUDING CONSTRAINTS` is required: without it the child misses the parent's `CHECK`
+            // constraint `event_store_cat_stream_chk` and the `ATTACH` is refused.
             sprintf('  CREATE TABLE %s (LIKE event_store INCLUDING DEFAULTS INCLUDING CONSTRAINTS);', $name),
             sprintf("  WITH moved AS (DELETE FROM event_store_default WHERE category = '%s' RETURNING *)", $category),
             sprintf('  INSERT INTO %s SELECT * FROM moved;', $name),

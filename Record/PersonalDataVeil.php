@@ -8,20 +8,21 @@ use Storm\Chronicler\Exception\NotADomainEvent;
 use Storm\Contracts\Message\DomainEvent;
 
 /**
- * The no-decrypt rule of the inspection surfaces, applied at render time: a stored event's payload
- * for DISPLAY, where a `#[Personal]` class's declared keys show what the STORE holds, the ciphered
- * envelope or the cleartext of a row written before the class was marked, never the rebuilt event's
- * decrypted values. Ciphertext on an operator's screen is honest and safe: diagnosing a stream does
- * not need the person's name, and the envelope's presence is itself the proof the field is
- * protected at rest.
+ * The no-decrypt rule of the inspection surfaces, applied when a stored event's payload is rendered.
  *
- * Everything else stays the HYDRATED CURRENT view the surfaces contract: aliases resolved,
- * upcasters run, business keys in today's shape. Only the declared personal keys are overlaid from
- * {@see EventRecord::$storedContent}. The one edge: a personal key the stored row does not carry,
- * born or renamed by an upcaster, has no stored form to show, and the hydrated value may be
- * decrypted cleartext, so it renders the key's declared fallback rather than leak.
+ * The declared keys of a `#[Personal]` class show what the store holds, the ciphered envelope or the
+ * cleartext of a row written before the class was marked, and never the rebuilt event's decrypted
+ * values. Ciphertext on an operator's screen is honest and safe: diagnosing a stream does not need the
+ * person's name, and the envelope's presence proves the field is protected at rest.
  *
- * An empty map, the unmarked-app default, makes this a pass-through of `toPayload()`.
+ * Everything else stays the hydrated, current view the surfaces contract: aliases resolved, upcasters
+ * run, business keys in today's shape. Only the declared personal keys are overlaid from
+ * {@see EventRecord::$storedContent}. A personal key the stored row does not carry, born or renamed by
+ * an upcaster, has no stored form to show and its hydrated value may be decrypted cleartext, so it
+ * renders the key's declared fallback rather than leak.
+ *
+ * An empty map, the default of an app with no marked class, makes this a pass-through of
+ * `toPayload()`.
  *
  * @see \Storm\Message\Attribute\Personal
  */
@@ -29,20 +30,26 @@ final readonly class PersonalDataVeil
 {
     public function __construct(
         /**
-         * The compiled `storm.personal_data` map: class => {subject, keys, fallbacks}; the bundle
-         * overrides the empty default with the `#[Personal]` scan product. Every declared key
-         * carries a fallback: `Personal::__construct` refuses the miss at container build, which is
-         * why `veil()` indexes `fallbacks` without a coalesce; a hand-built map owes the same
-         * shape, a missing fallback there renders a warning plus `null` instead of the veil.
+         * The compiled `storm.personal_data` map, each class to its `{subject, keys, fallbacks}`; the
+         * bundle overrides the empty default with the product of the `#[Personal]` scan.
          *
-         * @var array<class-string, array{subject: string, keys: list<string>, fallbacks: array<string, scalar|null>}>
+         * Every declared key carries a fallback, since `Personal::__construct` refuses the miss at
+         * container build, so `veil()` indexes `fallbacks` without a coalesce. A hand-built map owes
+         * the same shape: a missing fallback there renders a warning plus `null` instead of the veil.
+         *
+         * @var array<class-string, array{
+         *     subject: string,
+         *     keys: list<string>,
+         *     fallbacks: array<string, scalar|null>,
+         * }>
          */
         private array $map = [],
     ) {}
 
     /**
-     * Whether any marked class declares `$key` as personal, whatever the class: the question an
-     * inspection surface asks BEFORE it persists or compares an operator-supplied value against
+     * Whether any marked class declares `$key` as personal, whatever the class.
+     *
+     * An inspection surface asks it before persisting or comparing an operator-supplied value against
      * that key, where the per-class map would demand a type the surface does not have.
      */
     public function isDeclaredKey(string $key): bool
@@ -84,16 +91,16 @@ final readonly class PersonalDataVeil
     }
 
     /**
-     * The render-safe payload of a LIVE event, one that arrives rebuilt with no row behind it.
+     * The render-safe payload of a live event, one that arrives rebuilt with no row behind it.
      *
-     * A handler on the event bus, a live trace, a webhook: the surface holds the deserialized event
-     * and nothing else, so there is no stored form to overlay and `veil()` cannot serve it. Every
-     * declared key therefore renders its declared fallback, which makes this strictly more redacting
-     * than `veil()`: the envelope proves a field is protected, the fallback only says that it is.
+     * A handler on the event bus, a live trace or a webhook holds the deserialized event and nothing
+     * else, so there is no stored form to overlay and `veil()` cannot serve it. Every declared key
+     * renders its declared fallback, which makes this strictly more redacting than `veil()`: the
+     * envelope proves a field is protected, the fallback only says that it is.
      *
-     * It answers the question the two surfaces share, whether the value on the way out is the one the
-     * store ciphers, and it answers it without the row. A surface that HAS the row owes the sharper
-     * rendering and calls `veil()` instead.
+     * It answers the question both surfaces share, whether the value on the way out is the one the
+     * store ciphers, without the row. A surface that has the row owes the sharper rendering and calls
+     * `veil()` instead.
      *
      * An unmarked class passes through, as does a declared key the current shape does not carry.
      *

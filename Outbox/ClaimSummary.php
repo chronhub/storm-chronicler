@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Outbox;
 
 /**
- * What the claim handed the drain, per partition: how many rows, and up to which id. The
- * partition probe's window-check compares the partition's due pending rows against these, derived
+ * What the claim handed the drain, per partition: how many rows, and up to which id.
+ *
+ * The partition probe's window check compares the partition's due pending rows against these, derived
  * from the claim itself: no extra query, no extra locks.
  */
 final readonly class ClaimSummary
@@ -30,7 +31,7 @@ final readonly class ClaimSummary
 
         foreach ($rows as $row) {
             $count[$row->partition] = ($count[$row->partition] ?? 0) + 1;
-            $max[$row->partition] = $row->id; // the claim is ORDER BY id: last seen = max
+            $max[$row->partition] = $row->id; // the claim is `ORDER BY id`, so the last seen is the max
         }
 
         return new self($count, $max);

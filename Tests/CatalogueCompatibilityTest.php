@@ -17,13 +17,13 @@ use function implode;
 /**
  * One verdict family per way a declaration can move, judged against the event-change matrix.
  *
- * The verdicts are asserted on a PAIR of catalogues rather than on one, because that is what the
- * check is: a diff. A rule tested against a single catalogue would pin what the rule reads, never
- * what it compares, and the comparison is where every one of these lives.
+ * The verdicts are asserted on a pair of catalogs rather than on one, because the check is a diff.
+ * A rule tested against a single catalog would pin what the rule reads, never what it compares,
+ * and every one of these verdicts lives in the comparison.
  *
- * The passing cases carry as much as the failing ones. A gate that refuses a non-personal class rename under a
- * stable alias, or a version bump that DID ship its upcaster, is a gate a team routes around within
- * a week; the alias exists precisely to make the first free, and the second is the idiom the matrix
+ * The passing cases carry as much as the failing ones. A team routes around a gate within a week
+ * when it refuses a non-personal class rename under a stable alias, or a version bump that did ship
+ * its upcaster: the alias exists to make the first free, and the second is the idiom the matrix
  * prescribes.
  */
 final class CatalogueCompatibilityTest extends TestCase
@@ -127,7 +127,7 @@ final class CatalogueCompatibilityTest extends TestCase
     #[Group('adversarial')]
     public function dropping_a_replaces_entry_loses_the_same_rows_as_deleting_the_alias(): void
     {
-        // the two look nothing alike in a diff and are the SAME loss to a store: rows carrying the
+        // the two look nothing alike in a diff and are the same loss to a store: rows carrying the
         // former name resolve to nothing either way
         $verdicts = $this->compatibility()->verdicts(
             ['ordering.placed' => $this->entry(replaces: ['order.placed'])],
@@ -210,9 +210,9 @@ final class CatalogueCompatibilityTest extends TestCase
     #[Group('adversarial')]
     public function a_second_incompatibility_is_reported_too_and_not_stopped_at_the_first(): void
     {
-        // an operator fixes a contract in ONE pass, so a verdict naming one problem when two exist
-        // sends them back for a second round; the loop must run to the end and the list must carry
-        // every finding, not the first
+        // an operator fixes a contract in a single pass, so a verdict naming one problem when two
+        // exist sends them back for a second round; the loop must run to the end and the list must
+        // carry every finding, not the first
         $verdicts = $this->compatibility()->verdicts(
             ['order.placed' => $this->entry(), 'order.shipped' => $this->entry(version: 1)],
             ['order.shipped' => $this->entry(version: 2)],
@@ -228,9 +228,9 @@ final class CatalogueCompatibilityTest extends TestCase
     public function a_former_name_of_every_entry_is_resolvable_and_not_only_of_the_last(): void
     {
         // `resolvable()` merges each entry's `replaces` into one set, and a merge that kept only the
-        // last would forget the others. The catalogues are DIFFERENT on purpose: comparing one to
-        // itself hides every symmetric bug, both sides forgetting the same aliases and the diff
-        // coming out empty for the wrong reason
+        // last would forget the others. The two catalogs differ because comparing one to itself
+        // hides every symmetric bug: both sides forget the same aliases and the diff comes out
+        // empty for the wrong reason
         $verdicts = $this->compatibility()->verdicts(
             [
                 'ordering.placed' => $this->entry(replaces: ['order.placed']),
@@ -276,7 +276,7 @@ final class CatalogueCompatibilityTest extends TestCase
     public function an_upcaster_that_cannot_say_what_it_owns_is_reported_and_not_swallowed(): void
     {
         // the chain refuses to guess when a `supports()` probe throws, and so must this: a bump whose
-        // coverage cannot be established is not a bump that has been established
+        // coverage cannot be established does not count as covered
         $blind = new class() implements Upcaster
         {
             public function supports(string $alias, int $fromVersion): bool

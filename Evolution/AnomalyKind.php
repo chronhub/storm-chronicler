@@ -5,14 +5,16 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Evolution;
 
 /**
- * The kind of unreadability one conformance verdict names, so a deployment gate branches on a value
- * instead of matching the sentence riding beside it. Each kind points at a different repair:
+ * The kind of unreadability one conformance verdict names, for a deployment gate to branch on.
+ *
+ * A gate branches on this value instead of matching the sentence beside it, and each kind points at a
+ * different repair:
  *
  * - `UnknownType` and `NotAnEvent`: no declared domain event answers the stored type, so a
  *   declaration is what is missing and no version is in question.
  *
  * - `AboveRuntime`: rows sit higher than this binary knows, the rolled-back deploy; rolling the
- *   binary FORWARD is the repair, never an upcaster.
+ *   binary forward is the repair, never an upcaster.
  *
  * - `MissingStep` and `DuplicatedStep`: between the stored floor and the current version a step has
  *   no owner or two, so an upcaster is owed or one too many is registered.

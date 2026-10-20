@@ -8,45 +8,48 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception;
 
 /**
- * Reports whether the deployment actually holds the assumption {@see SafeHeadAdvancer} rests on: that
- * no append transaction can stay in-flight longer than the grace.
+ * Reports whether the deployment holds the assumption the safe-head advancer rests on.
  *
- * The advancer steps over a gap whose upper neighbor is older than the grace, presuming the missing
- * `sequence_no` was aborted. A writer that reserves a position, outlives the grace, then commits, is
- * skipped by every filtered catch-up already past it; permanent read-model incompleteness, not lag.
- * The presumption must be made mechanically true by a writer-side timeout, and a precondition nobody
- * verifies is a wish.
+ * {@see SafeHeadAdvancer} assumes no append transaction stays in flight longer than the grace: it steps
+ * over a gap whose upper neighbor is older than the grace, presuming the missing `sequence_no` aborted.
+ * A writer that reserves a position, outlives the grace and then commits is skipped by every filtered
+ * catch-up already past it: permanent read-model incompleteness, not lag. A writer-side timeout must
+ * make the presumption mechanically true, and a precondition nobody verifies is a wish.
  *
- * What it can and cannot conclude, stated because the asymmetry decides how the caller must use it:
+ * The check is asymmetric, and the asymmetry decides how a caller must use it:
  *
- * - It can prove the precondition FALSE. `transaction_timeout = 0` means no writer is bounded, full
- *   stop, whatever the role or session.
+ * - It can prove the precondition false: `transaction_timeout = 0` means no writer is bounded, whatever
+ *   the role or session.
  *
- * - It cannot prove it TRUE. These are session/role settings; this connection's value is what THIS
- *   connection's writers get, strong evidence when the app appends through the same DSN, and no
- *   promise at all about a writer connecting differently.
+ * - It cannot prove it true. These are session or role settings: this connection's value is what this
+ *   connection's writers get, strong evidence when the app appends through the same DSN, and no promise
+ *   at all about a writer that connects differently.
  *
- * So it reports and never reassures: silence here means "nothing observed", not "verified". For the
- * same reason nothing in Storm refuses to run on the strength of it; the scope note below says what
- * enforcing it would cost.
+ * So it reports and never reassures: silence means "nothing observed", not "verified". For the same
+ * reason nothing in Storm refuses to run on the strength of it; the last paragraph says what enforcing
+ * it would cost.
  *
- * `idle_in_transaction_session_timeout` is deliberately NOT accepted as the guard. It terminates a
- * session sitting IDLE inside a transaction; it does not touch a transaction that is busy, and a slow
- * append, a lock wait, a long handler on the write connection, is busy. It narrows the window, it
- * does not close it, so an operator who set only that one is told exactly that rather than left
- * believing they are covered.
+ * The check rejects `idle_in_transaction_session_timeout` as the guard. That setting ends a session
+ * sitting idle inside a transaction and leaves a busy transaction alone, and a slow append, a lock wait
+ * or a long handler on the write connection is busy. It narrows the window without closing it, so an
+ * operator who set only that one is told so rather than left believing they are covered.
  *
- * Deliberately NOT enforced by Storm itself, weighed and rejected for now:
- * `SET LOCAL transaction_timeout` inside the append transaction would make the presumption true from
- * the writer side, scoped exactly to the transaction it is about. Three costs stopped it: it is one
- * extra round trip on every append, on a hot path this project benches hard; `transaction_timeout`
- * TERMINATES the session rather than canceling the statement, so an overrun kills a worker's
- * connection; and appends nest inside a caller's application-level transaction, where the setting
- * would bound that whole outer unit of work, not just the append. Worth revisiting as an opt-in, not
- * worth smuggling in as a default. The connection-wide alternative, `ALTER ROLE … SET
- * transaction_timeout`, has the mirror problem: it bounds EVERY transaction on that connection, the
- * projection batches and the installer's own DDL included, so it is only sound where writers have a
- * connection of their own.
+ * Storm does not enforce the timeout itself. `SET LOCAL transaction_timeout` inside the append
+ * transaction would make the presumption true from the writer side, scoped to that transaction, at
+ * three costs:
+ *
+ * - One extra round trip on every append, on a hot path.
+ *
+ * - `transaction_timeout` terminates the session rather than canceling the statement, so an overrun
+ *   kills a worker's connection.
+ *
+ * - Appends nest inside a caller's application-level transaction, where the setting would bound the
+ *   whole outer unit of work, not just the append.
+ *
+ * It fits as an opt-in rather than a default. The connection-wide alternative,
+ * `ALTER ROLE … SET transaction_timeout`, has the mirror problem: it bounds every transaction on that
+ * connection, the projection batches and the installer's own DDL included, so it is sound only where
+ * writers have a connection of their own.
  */
 final readonly class SafeHeadPrecondition
 {
@@ -56,12 +59,12 @@ final readonly class SafeHeadPrecondition
     ) {}
 
     /**
-     * Everything this connection can see that contradicts the presumption, most load-bearing first.
+     * Everything this connection can see that contradicts the presumption, most serious first.
      *
      * @return list<string> human-readable findings; empty means nothing was observed, which is not a
      *                      certificate
      *
-     * @throws Exception on a DBAL failure interrogating the settings / activity views
+     * @throws Exception on a DBAL failure interrogating the settings or activity views
      */
     public function problems(): array
     {
@@ -100,9 +103,11 @@ final readonly class SafeHeadPrecondition
     }
 
     /**
-     * A timeout GUC in seconds. Read from `pg_settings`, whose `setting` is the raw value in the
-     * GUC's base unit, milliseconds here; `current_setting()` returns a display string, '4s' or
-     * '250ms', that would have to be parsed back.
+     * A timeout GUC in seconds.
+     *
+     * Read from `pg_settings`, whose `setting` is the raw value in the GUC's base unit, milliseconds
+     * here; `current_setting()` returns a display string, '4s' or '250ms', that would have to be parsed
+     * back.
      *
      * @throws Exception on a DBAL failure of the settings read
      */
@@ -119,12 +124,13 @@ final readonly class SafeHeadPrecondition
     }
 
     /**
-     * Age of the longest transaction currently open on this database, this backend excluded since the
-     * installer runs inside one of its own.
+     * Age of the longest transaction currently open on this database, this backend excluded.
      *
-     * Evidence, never reassurance: a non-superuser without `pg_read_all_stats` gets `xact_start`
-     * nulled for other users' backends, so this can read 0 while a foreign writer sits there. It can
-     * therefore raise a finding but never retire one, which is why a zero is not reported at all.
+     * This backend is left out because the installer runs inside a transaction of its own.
+     *
+     * The reading is evidence, never reassurance: a non-superuser without `pg_read_all_stats` gets
+     * `xact_start` nulled for other users' backends, so this can read 0 while a foreign writer sits
+     * there. It can raise a finding but never retire one, which is why a zero is not reported at all.
      *
      * @throws Exception on a DBAL failure of the activity read
      */

@@ -8,9 +8,10 @@ use RuntimeException;
 use Storm\Contracts\Message\SerializablePayload;
 
 /**
- * Test double: a loadable `SerializablePayload` that is NOT a `DomainEvent`, the shape a restored
- * or imported row could smuggle into the store; hydrating it is the failure the read gate refuses,
- * so `fromPayload` throws to prove the gate fired first.
+ * Test double: a loadable `SerializablePayload` that is not a `DomainEvent`.
+ *
+ * It is the shape a restored or imported row could smuggle into the store. Hydrating it is the
+ * failure the read gate refuses, so `fromPayload()` throws to prove the gate fired first.
  */
 final class NotAnEventPayload implements SerializablePayload
 {

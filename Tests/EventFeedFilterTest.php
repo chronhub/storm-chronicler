@@ -12,10 +12,18 @@ use Storm\Chronicler\Query\EventFeedFilter;
 use Storm\Stream\StreamName;
 
 /**
- * Unit pin of the windowed feed read; the actual paging over a store is covered by the
- * QueryProjectionRunner integration test. Here: the window is stamped and honored, the scope derives
- * its clauses from one StreamName, category always and stream when qualified or explicitly exact, the type clause is
- * conditional and bound, and the order is the catch-up order.
+ * Unit pin of the windowed feed read.
+ *
+ * The `QueryProjectionRunner` integration test covers the actual paging over a store. Here:
+ *
+ * - The window is stamped and honored
+ *
+ * - The scope derives its clauses from one `StreamName`: the category always, the stream when
+ *   qualified or explicitly exact
+ *
+ * - The type clause is conditional and bound
+ *
+ * - The order is the catch-up order
  */
 final class EventFeedFilterTest extends TestCase
 {
@@ -40,7 +48,7 @@ final class EventFeedFilterTest extends TestCase
     #[Test]
     public function defaults_to_an_unbounded_window_before_the_runner_stamps_one(): void
     {
-        // a one-shot apply() without window() still reads (0, PHP_INT_MAX], no undefined state.
+        // a one-shot `apply()` without `window()` still reads `(0, PHP_INT_MAX]`, no undefined state.
         $qb = $this->queryBuilder();
 
         new EventFeedFilter()->apply($qb);
@@ -52,7 +60,7 @@ final class EventFeedFilterTest extends TestCase
     #[Test]
     public function scopes_to_a_whole_category_when_the_stream_name_is_bare(): void
     {
-        // a bare StreamName carries only the category, so prune the partition, no exact-stream narrow.
+        // a bare `StreamName` carries only the category, so prune the partition, no exact-stream narrow.
         $qb = $this->queryBuilder();
 
         $filter = new EventFeedFilter(scope: new StreamName('account'));
@@ -80,7 +88,8 @@ final class EventFeedFilterTest extends TestCase
     #[Test]
     public function narrows_to_one_stream_when_the_scope_is_qualified(): void
     {
-        // a qualified StreamName emits BOTH: category, for partition prune or index lead, plus exact stream.
+        // a qualified `StreamName` emits both: the category, for partition prune or index lead, plus
+        // the exact stream.
         $qb = $this->queryBuilder();
 
         $filter = new EventFeedFilter(scope: new StreamName('account')->withQualifier('1'));
@@ -123,7 +132,7 @@ final class EventFeedFilterTest extends TestCase
     #[Test]
     public function omits_the_type_clause_when_types_is_empty(): void
     {
-        // an empty type set means "all types", the same as null, not an unsatisfiable IN ().
+        // an empty type set means "all types", the same as null, not an unsatisfiable `IN ()`.
         $qb = $this->queryBuilder();
 
         new EventFeedFilter(types: [])->apply($qb);

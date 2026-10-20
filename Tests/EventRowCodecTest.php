@@ -55,8 +55,9 @@ final class EventRowCodecTest extends TestCase
     #[Test]
     public function wraps_an_unencodable_payload_as_a_serialization_failure(): void
     {
-        // a content value json_encode rejects, invalid UTF-8, crosses as the contracted SerializationException
-        // from cannotEncode, never a raw JsonException; the write boundary owes the same translation as the read.
+        // a content value `json_encode()` rejects, invalid UTF-8, crosses as the contracted
+        // `SerializationException` from `cannotEncode()`, never a raw `JsonException`; the write
+        // boundary owes the same translation as the read.
         $message = new Message(
             new SomethingHappened("\xB1\x31"),
             [
@@ -74,9 +75,9 @@ final class EventRowCodecTest extends TestCase
     #[Test]
     public function refuses_to_persist_a_non_event_message(): void
     {
-        // redundant defense behind Stream's own gate, but toRow is publicly callable with a bare Message:
-        // a persisted non-event poisons every later read, EventRecord throwing NotADomainEvent, so it is
-        // refused at the WRITE, symmetric with the read.
+        // a redundant defense behind `Stream`'s own gate, but `toRow()` is publicly callable with a
+        // bare `Message`: a persisted non-event fails every later read, `EventRecord` throwing
+        // `NotADomainEvent`, so it is refused at the write, symmetric with the read.
         $this->expectException(NotADomainEvent::class);
 
         $this->persistence->toRow(new StreamName('order-1'), new Message(new stdClass));
@@ -108,9 +109,9 @@ final class EventRowCodecTest extends TestCase
     #[Test]
     public function refuses_a_stored_type_resolving_to_a_loadable_non_event_before_hydration(): void
     {
-        // the symmetric read-side gate of refuses_to_persist_a_non_event_message: a row whose `type`
-        // names a loadable SerializablePayload that is NOT a DomainEvent, the shape a restore or an
-        // import could smuggle in, is refused BEFORE fromPayload runs; the fixture throws on
+        // the read-side twin of `refuses_to_persist_a_non_event_message`: a row whose `type` names a
+        // loadable `SerializablePayload` that is not a `DomainEvent`, the shape a restore or an
+        // import could smuggle in, is refused before `fromPayload()` runs; the fixture throws on
         // hydration, so reaching it would fail this test with the wrong exception
         $row = $this->persistence->toRow(new StreamName('order-1'), $this->message());
         $row['type'] = NotAnEventPayload::class;

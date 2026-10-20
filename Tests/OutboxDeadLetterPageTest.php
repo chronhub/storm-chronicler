@@ -16,7 +16,7 @@ final class OutboxDeadLetterPageTest extends TestCase
     #[Test]
     public function the_page_bounds_itself_in_sql_rather_than_after_the_read(): void
     {
-        // the whole point of the paged read: the cap and the cursor ride the statement, so a
+        // the paged read exists for this: the cap and the cursor travel in the statement, so a
         // dead-letter that grew unattended can never be loaded whole and sliced afterwards.
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->once())

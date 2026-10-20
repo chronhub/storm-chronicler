@@ -26,31 +26,30 @@ use function token_get_all;
  * SQL that filters `event_store` on the correlation header writes the form its index is built on.
  *
  * `event_store_correlation_idx` indexes the expression `header #>> '{__correlation_id}'`. PostgreSQL
- * matches an expression index STRUCTURALLY, so `header->>'__correlation_id'` misses it entirely while
+ * matches an expression index structurally, so `header->>'__correlation_id'` misses it entirely while
  * returning byte-identical text. Nothing reports that: the rows are right, every gate stays green,
- * and the query silently becomes a full scan of the largest table in the system. Measured on a
- * 300k-row store, the same point lookup costs 6383 buffers one way and 4 the other.
+ * and the query silently becomes a full scan of the largest table in the system.
  *
  * The framework declares the index, so the framework owes the guard. `InspectFilter` binds the path
- * as `#>> string_to_array(:p, ',')`, and is the reason this reads zero offenders today rather than
- * the rule being unexercised. That spelling reaches the index only when the planner folds the bound
- * parameter back into the indexed expression, which a custom plan does; a generic plan keeps the
- * parameter opaque and matches the form to no index at all.
+ * as `#>> string_to_array(:p, ',')`, a live site that conforms, so the zero offenders this guard
+ * reads come from an exercised rule. That spelling reaches the index only when the planner folds the
+ * bound parameter back into the indexed expression, which a custom plan does; a generic plan keeps
+ * the parameter opaque and matches the form to no index at all.
  *
  * A comparison against a column pinned `COLLATE "C"` misses the index the same way, resolving to a
  * collation it is not built under. Collate to the side whose index must serve.
  *
- * A PROJECTION of the header is not a filter and is free to use either form, and `LIKE 'prefix%'` is
- * left out too, a btree serving a prefix only under a byte-ordered collation this index does not
- * carry. What is refused is the equality an index could have served.
+ * The guard refuses the equality an index could have served. A projection of the header is no
+ * filter and may use either form, and `LIKE 'prefix%'` is left out too: a btree serves a prefix only
+ * under a byte-ordered collation, which this index does not carry.
  */
 final class CorrelationIndexFormTest extends TestCase
 {
     /**
      * The key form under an operator an equality index could have served, in both operand orders.
      *
-     * Warning: matching only `=` is the trap this guard fell into on its first authoring: `NOT IN` slipped
-     * through, and it was a live site rather than a hypothetical one.
+     * Warning: matching only `=` is a trap, since `NOT IN` would slip through and live code writes
+     * that form.
      *
      * @var list<string>
      */
@@ -98,13 +97,17 @@ final class CorrelationIndexFormTest extends TestCase
         ));
     }
 
-    /** @return list<string> */
+    /**
+     * @return list<string>
+     */
     private static function sourceFiles(): array
     {
         return glob(dirname(__DIR__, 2).'/*/{,*/,*/*/,*/*/*/}*.php', GLOB_BRACE) ?: [];
     }
 
-    /** Comments are stripped so a docblock quoting the wrong form is not read as a use of it. */
+    /**
+     * Comments are stripped so a docblock quoting the wrong form is not read as a use of it.
+     */
     private static function withoutComments(string $source): string
     {
         $code = '';

@@ -4,27 +4,32 @@ declare(strict_types=1);
 
 namespace Storm\Chronicler\Evolution;
 
+use ReflectionAttribute;
 use ReflectionClass;
 use Storm\Chronicler\Exception\DuplicateEventAlias;
 use Storm\Chronicler\Exception\UnknownEventType;
 use Storm\Contracts\Chronicler\EventTypeMapper;
+use Storm\Message\AliasDeclaration;
 use Storm\Message\EventType;
 
 /**
- * EventTypeMapper backed by the `#[EventType]` attributes: the stored type is a stable,
- * dev-chosen alias decoupled from the FQCN.
+ * The `EventTypeMapper` backed by alias-declaring attributes, `#[EventType]` and `#[CommandType]`.
  *
- * - `toType`, on write, reflects the class's own `#[EventType]` to its canonical alias; no
- *   attribute means the FQCN, for gradual adoption. It is reflection-based, so it is correct
- *   without the scan and a writer never silently mistypes.
+ * The stored type is a stable alias chosen by the developer, decoupled from the FQCN, and one map
+ * serves both sorts.
  *
- * - `toClass`, on read, uses the scanned reverse map, canonical plus replaces, keyed to the class;
- *   a stored type that is not a registered alias falls back to a loadable FQCN for legacy or
- *   unaliased rows; if neither resolves it fails fast with UnknownEventType, usually because the
- *   scan or bundle wasn't wired.
+ * - `toType()`, on write, reflects the class's own declaration to its canonical alias, and no
+ *   declaration means the FQCN, for gradual adoption. Being reflection-based, it is correct without
+ *   the scan, and a writer never silently mistypes.
  *
- * The reverse map is built from the event classes the scan finds; an empty list means all-FQCN,
- * an app with no aliases. Aliases are unique across the union, enforced by DuplicateEventAlias.
+ * - `toClass()`, on read, uses the scanned reverse map, canonical plus replaces, keyed to the class. A
+ *   stored type that is not a registered alias falls back to a loadable FQCN for legacy or unaliased
+ *   rows; if neither resolves, it fails fast with `UnknownEventType`, usually because the scan or the
+ *   bundle was not wired.
+ *
+ * The reverse map is built from the classes the scan finds; an empty list means FQCNs only, an app
+ * with no aliases. `DuplicateEventAlias` keeps aliases unique across the union, and refuses a class
+ * declaring both sorts.
  */
 final class MappedEventTypeMapper implements EventTypeMapper
 {
@@ -32,20 +37,26 @@ final class MappedEventTypeMapper implements EventTypeMapper
     private array $classByAlias = [];
 
     /**
-     * @param  list<class-string>  $eventClasses  classes carrying `#[EventType]` from the scan
+     * @param  list<class-string>  $eventClasses  classes carrying an `AliasDeclaration` from the scan
      *
-     * @throws DuplicateEventAlias when two classes claim the same alias
+     * @throws DuplicateEventAlias when two classes claim the same alias, or one class declares two sorts
      */
     public function __construct(array $eventClasses = [])
     {
         foreach ($eventClasses as $class) {
-            $eventType = self::attributeOf($class);
+            $declarations = self::declarationsOf($class);
 
-            if ($eventType === null) {
+            if (count($declarations) > 1) {
+                throw DuplicateEventAlias::twoSortsOnOneClass($class, $declarations[0]->alias, $declarations[1]->alias);
+            }
+
+            $declaration = $declarations[0] ?? null;
+
+            if ($declaration === null) {
                 continue;
             }
 
-            foreach ([$eventType->alias, ...$eventType->replaces] as $alias) {
+            foreach ([$declaration->alias, ...$declaration->replaces] as $alias) {
                 if (isset($this->classByAlias[$alias]) && $this->classByAlias[$alias] !== $class) {
                     throw DuplicateEventAlias::between($alias, $this->classByAlias[$alias], $class);
                 }
@@ -57,28 +68,29 @@ final class MappedEventTypeMapper implements EventTypeMapper
 
     public function toType(string $class): string
     {
-        $eventType = self::attributeOf($class);
+        $declaration = self::attributeOf($class);
 
-        return $eventType === null ? $class : $eventType->alias;
+        return $declaration === null ? $class : $declaration->alias;
     }
 
     public function versionOf(string $class): int
     {
-        $eventType = self::attributeOf($class);
+        $declaration = self::attributeOf($class);
 
-        return $eventType === null ? 1 : $eventType->version;
+        // a command has no schema version: it is never replayed from a store, so nothing upcasts it
+        return $declaration instanceof EventType ? $declaration->version : 1;
     }
 
     public function storedTypesOf(string $class): array
     {
-        $eventType = self::attributeOf($class);
+        $declaration = self::attributeOf($class);
 
-        if ($eventType === null) {
+        if ($declaration === null) {
             return [$class];
         }
 
-        // current alias + every replaced alias + the FQCN, for rows written before the alias existed
-        return array_values(array_unique([$eventType->alias, ...$eventType->replaces, $class]));
+        // the current alias, every replaced alias and the FQCN, for rows written before the alias existed
+        return array_values(array_unique([$declaration->alias, ...$declaration->replaces, $class]));
     }
 
     public function toClass(string $type): string
@@ -94,27 +106,40 @@ final class MappedEventTypeMapper implements EventTypeMapper
         throw UnknownEventType::cannotResolve($type);
     }
 
-    private static function attributeOf(string $class): ?EventType
+    private static function attributeOf(string $class): ?AliasDeclaration
     {
-        // Memoized: the #[EventType] of a class never changes at runtime, yet toType/versionOf/storedTypesOf
-        // reflect it for EVERY event written, millions of times per drain. The
-        // result, an immutable readonly EventType or null, is a pure function of $class, so cache it per class;
-        // a long-lived worker reflects once then serves O(1). Static so all mapper instances share one table.
-        /** @var array<string, EventType|null> $cache */
+        // Memoized: the declaration of a class never changes at runtime, yet `toType()`, `versionOf()` and
+        // `storedTypesOf()` reflect it for every event and every command written, millions of times per
+        // drain. The result, an immutable declaration or null, is a pure function of $class, so a long-lived
+        // worker reflects once per class and then serves O(1); static, so every mapper instance shares one
+        // table. The constructor refused a class of two sorts, so the first declaration is the one.
+        /** @var array<string, AliasDeclaration|null> $cache */
         static $cache = [];
 
         if (array_key_exists($class, $cache)) {
-            // @infection-ignore-all; equivalent: the recomputation below is a pure function of the class,
+            // equivalent: the recomputation below is a pure function of the class,
             // so falling through rebuilds an equal value; the cache buys time alone
+            // @infection-ignore-all
             return $cache[$class];
         }
 
+        return $cache[$class] = self::declarationsOf($class)[0] ?? null;
+    }
+
+    /**
+     * Every alias declaration a class carries, in attribute order; none for a class that does not load.
+     *
+     * @return list<AliasDeclaration>
+     */
+    private static function declarationsOf(string $class): array
+    {
         if (! class_exists($class)) {
-            return $cache[$class] = null;
+            return [];
         }
 
-        $attributes = new ReflectionClass($class)->getAttributes(EventType::class);
-
-        return $cache[$class] = ($attributes === [] ? null : $attributes[0]->newInstance());
+        return array_map(
+            static fn (ReflectionAttribute $attribute): AliasDeclaration => $attribute->newInstance(),
+            new ReflectionClass($class)->getAttributes(AliasDeclaration::class, ReflectionAttribute::IS_INSTANCEOF),
+        );
     }
 }

@@ -21,10 +21,10 @@ return static function (ContainerConfigurator $container): void {
         ->autowire()
         ->autoconfigure();
 
-    // FactAppend rides the SAME decorated write chain as DecisionAppend, Retry then Transactional then
-    // Postgres. Alias-to-alias, deliberately: the decorators declare #[AsDecorator(DecisionAppend)],
-    // and decoration re-routes ONLY the id it targets; a FactAppend alias pointing at the concrete
-    // would silently bypass the whole chain, with no retry and no per-append transaction.
+    // `FactAppend` takes the same decorated write chain as `DecisionAppend`, retry then transactional
+    // then Postgres, by aliasing the alias: the decorators declare `#[AsDecorator(DecisionAppend)]`,
+    // and decoration re-routes only the id it targets, so a `FactAppend` alias pointing at the
+    // concrete would silently bypass the whole chain, with no retry and no per-append transaction.
     $services->alias(FactAppend::class, DecisionAppend::class);
 
     $services->load('Storm\\Chronicler\\', dirname(__DIR__).'/')
@@ -53,8 +53,8 @@ return static function (ContainerConfigurator $container): void {
             dirname(__DIR__).'/Telemetry/SafeHeadCrossingContext.php',
             dirname(__DIR__).'/Telemetry/LoadContext.php',
             dirname(__DIR__).'/Telemetry/OccConflictContext.php',
-            // opt-in on purpose: the bundle wires the category existence cache only when
-            // storm.stream_existence_cache is enabled; excluded here so "off" means zero services
+            // opt-in: the bundle wires the category existence cache only when
+            // `storm.stream_existence_cache` is enabled, and the exclusion makes "off" mean zero services
             dirname(__DIR__).'/Directory/CategoryCachedStreamExistence.php',
             dirname(__DIR__).'/Erasure/CacheEvictingStreamEraser.php',
         ]);

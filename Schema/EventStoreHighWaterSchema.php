@@ -9,10 +9,10 @@ use Storm\Chronicler\SafeHead\SafeHeadAdvancer;
 /**
  * Raw PostgreSQL DDL for `event_store_high_water`, the safe-head cursor.
  *
- * A single row, guarded by CHECK id = 1, holding the floor the catch-up watermark has ratcheted to.
- * Internal catch-up machinery, not a domain table. Correctness does NOT depend on it: SafeHeadAdvancer
- * recomputes correctly from any floor; the cursor only keeps the per-cycle `sequence_no` gap scan's
- * tail short.
+ * A single row, guarded by `CHECK (id = 1)`, holds the floor the catch-up watermark has ratcheted to. It
+ * is internal catch-up machinery, not a domain table. Correctness does not depend on it:
+ * `SafeHeadAdvancer` recomputes correctly from any floor, and the cursor only keeps the per-cycle
+ * `sequence_no` gap scan's tail short.
  *
  * It carries no FK to `event_store`, being an independent singleton, so creation order between the
  * two does not matter.

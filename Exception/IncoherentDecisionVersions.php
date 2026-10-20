@@ -8,14 +8,15 @@ use LogicException;
 use Storm\Contracts\Chronicler\ChroniclerExceptionContract;
 
 /**
- * A decision batch claims versions that are not exactly `expectedVersion + 1 .. expectedVersion + N`.
+ * A decision batch claims versions other than exactly `expectedVersion + 1 .. expectedVersion + N`.
  *
- * The decision path persists the versions the PRODUCER stamps, while the head moves by arithmetic;
- * the caller of `DecisionAppend` owns its decision's positions, unlike a fact, whose position the
- * store allocates. A skewed, gapped or disordered batch would divorce `stream_heads` from the durable
- * rows and corrupt the next OCC base. A caller bug to fix, not a runtime condition to handle; hence a
- * `LogicException` thrown BEFORE the head moves, the write-side mirror of the repository's read-side
- * continuity guard.
+ * The decision path persists the versions the producer stamps, while the head moves by arithmetic: the
+ * caller of `DecisionAppend` owns its decision's positions, where the store allocates a fact's. A
+ * skewed, gapped or disordered batch would leave `stream_heads` disagreeing with the durable rows and
+ * corrupt the next OCC base.
+ *
+ * It is a caller bug to fix rather than a runtime condition to handle, so a `LogicException` is thrown
+ * before the head moves. It mirrors on the write side the repository's read-side continuity guard.
  */
 final class IncoherentDecisionVersions extends LogicException implements ChroniclerExceptionContract
 {

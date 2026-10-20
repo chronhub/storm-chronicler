@@ -12,17 +12,18 @@ use Storm\Chronicler\Outbox\OutboxWriter;
  *
  * Rows are written in the same transaction as the events, atomically, then drained by a relay that
  * publishes them to the async transport after commit. `position` is the event's `sequence_no`, exact
- * and captured in-TX. The whole table is optional; alias OutboxWriter to the null one to disable it.
+ * and captured inside the transaction. The whole table is optional: alias `OutboxWriter` to
+ * `NullOutboxWriter` to disable it.
  *
  * A `pending` row is relayed, then disposed of per `storm.outbox.disposal`. It is deleted by default,
  * a queue not being a ledger: the event lives in `event_store` and the consumption proof in `es_inbox`.
  * The alternative moves it to the append-only `es_outbox_archive`, the delivery audit, off the hot
- * path. Either way the hot table holds only in-flight work, which is what keeps autovacuum ahead of
- * the pending-index graveyard under load.
+ * path. Either way the hot table holds only in-flight work, which keeps autovacuum ahead of the dead
+ * entries the pending index accumulates under load.
  *
  * What the bookkeeping columns carry:
  *
- * - `attempts` counts what the relay SPENT on the row, which is publish failures on the ordinary path;
+ * - `attempts` counts what the relay spent on the row, which is publish failures on the ordinary path;
  *   a row dead-lettered on a decode that no release will fix is stamped 1 without ever having been
  *   handed to a publisher, since the dead-letter write bumps the counter it finds. A stalled row keeps
  *   its own untouched, that budget measuring the broker and not a deployment. `last_error` and
@@ -34,14 +35,14 @@ use Storm\Chronicler\Outbox\OutboxWriter;
  * - `partition_key`, the qualified stream, scopes ordering: the relay preserves order within a
  *   partition, so a stuck row blocks its own aggregate and nothing else.
  *
- * Dead-lettered `failed` rows are NEVER disposed of; they stay for inspection or replay. Such a row
- * drops out of the `pending` index, so it stops blocking the relay head, and it enters its own
- * `failed` partial index instead, so an ever-growing dead-letter never costs `storm:outbox:failed`
- * a seq-scan. Safe N-worker parallel draining needs no extra column: the relay claims each partition
- * with a transaction-scoped Postgres advisory lock.
+ * Dead-lettered `failed` rows are never disposed of; they stay for inspection or replay. Such a row
+ * drops out of the `pending` index, so it stops blocking the relay head, and enters its own `failed`
+ * partial index instead, so an ever-growing dead-letter never costs `storm:outbox:failed` a sequential
+ * scan. Safe parallel draining by N workers needs no extra column: the relay claims each partition with
+ * a transaction-scoped Postgres advisory lock.
  *
- * The archive half of that disposal has its own schema class, because this table is the hot path,
- * that one is the audit, and the two evolve on different clocks.
+ * The archive half of that disposal has its own schema class, because this table is the hot path, that
+ * one is the audit, and the two evolve at different paces.
  *
  * @see OutboxArchiveSchema
  * @see OutboxRelay
@@ -86,27 +87,27 @@ final class OutboxSchema
                 )
                 SQL,
             // The status lifecycle, enforced by the database and not only by the writers. A row with
-            // any other status is a ZOMBIE: invisible to the relay, which claims on `status =
-            // 'pending'`, and invisible to `storm:outbox:failed`, which reads `status = 'failed'`, so
-            // it sits forever undelivered and unlisted in a table whose whole point is that nothing
-            // in it is forgotten. Normal paths cannot produce one; restores, manual repair and
-            // imports are where an immutable store wants a second line of defense.
+            // any other status would be invisible to the relay, which claims on
+            // `status = 'pending'`, and to `storm:outbox:failed`, which reads `status = 'failed'`, so
+            // it would sit forever undelivered and unlisted in a table meant to forget nothing.
+            // Normal paths cannot produce one; restores, manual repair and imports are where an
+            // immutable store wants a second line of defense.
             //
-            // There is no published status here, and adding one would create the zombie class this
-            // guards against: success DISPOSES of the row, by delete or by the atomic move to the
-            // archive, so a published row never exists to be read. The saga outbox is the one that
-            // marks instead of disposing, on its own table.
+            // There is no published status here, and adding one would create the invisible rows this
+            // guards against: success disposes of the row, by delete or by the atomic move to the
+            // archive, so a published row never exists to be read. The saga outbox marks instead of
+            // disposing, on its own table.
             //
-            // Shipped inline in the CREATE TABLE only: a store predating this constraint is
-            // RECREATED, never converged, and its absence surfaces as a loud refusal from the
-            // conformance probe instead. An `ADD CONSTRAINT` guarded against `duplicate_object`
-            // could not do more anyway: it adds a MISSING constraint and stays silent on one whose
-            // definition changed, which is the case a convergence step would exist for.
+            // The constraint ships inline in the `CREATE TABLE` only: a store predating it is
+            // recreated, never converged, and its absence surfaces as a loud refusal from the
+            // conformance probe. An `ADD CONSTRAINT` guarded against `duplicate_object` could not do
+            // more: it adds a missing constraint and stays silent on one whose definition changed,
+            // which is the case a convergence step would exist for.
             /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_outbox_pending_idx ON es_outbox (id) WHERE status = 'pending'
                 SQL,
-            // The relay's per-partition ordering probe MUST ride this index. That probe is the
+            // The relay's per-partition ordering probe must use this index. That probe is the
             // N-relay ordering guard, reading the head `min(id)` plus its cooling and window
             // aggregates over `partition_key = ? AND status = 'pending' AND id <= max_claimed`.
             // One statement covers all owned partitions, with a bounded scan per partition. Without
@@ -118,23 +119,23 @@ final class OutboxSchema
             //
             // The `(id)` partial above stays, and neither index replaces the other: that one serves
             // the global claim, `ORDER BY id LIMIT n`, whose due-filter is an ordinary scan an
-            // INCLUDE cannot serve.
+            // `INCLUDE` cannot serve.
             /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_outbox_partition_pending_idx ON es_outbox (partition_key, id) INCLUDE (next_attempt_at) WHERE status = 'pending'
                 SQL,
             // The dead-letter's own partial index, the `failed` mirror of `es_outbox_pending_idx`.
-            // `failed` rows are NEVER disposed of by design (see above), so this set only grows for
-            // the life of the store; every `storm:outbox:failed` list, count, requeue and purge reads
-            // `WHERE status = 'failed'`, and without this index each one seq-scans the whole table,
-            // a cost that rises with every dead-letter ever kept, not with the ones an operator asked
+            // `failed` rows are never disposed of, as the class block states, so this set only grows
+            // for the life of the store; every `storm:outbox:failed` list, count, requeue and purge
+            // reads `WHERE status = 'failed'`, and without this index each one scans the whole table,
+            // a cost that rises with every dead letter ever kept, not with the ones an operator asked
             // to see.
             /* language=PostgreSQL */
             <<<'SQL'
                 CREATE INDEX IF NOT EXISTS es_outbox_failed_idx ON es_outbox (id) WHERE status = 'failed'
                 SQL,
             // The relay's heartbeat, one row per relay name, upserted on every drain whether or not
-            // it found work. It is the ONE signal of a relay that is alive on a quiet system: the
+            // it found work. It is the one signal of a relay that is alive on a quiet system: the
             // pending-age surfaces read nothing when nothing is pending, so a relay that died on an
             // idle night is invisible to them until the first backlog. `relayed_total` counts the
             // rows disposed of over the relay's life, a monotone the operator can watch move.

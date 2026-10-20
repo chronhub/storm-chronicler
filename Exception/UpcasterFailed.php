@@ -11,16 +11,22 @@ use Storm\Contracts\Chronicler\UndecodableRow;
 use Throwable;
 
 /**
- * An upcaster's own code threw, either while migrating a payload or while being probed through
- * `supports()`: a TypeError on a field the payload does not carry, a failed assertion, a service
- * that cannot even answer which steps it owns. The chain wraps both moments instead of letting
- * them escape raw, because a raw Throwable is indistinguishable from an infrastructure crash: on
- * the outbox relay it would roll back the whole drained batch and crash-loop the daemon, when the
- * condition is the same runtime incompatibility as a missing step, THIS binary cannot decode the
- * row, a corrected deployment can, so it belongs to the same stalled disposition. The wrap names
- * the upcaster class and the step, since the underlying "undefined array key" says neither which
- * service is wrong nor which event it choked on; the original failure is preserved as `previous`.
- * A coding error to fix, hence a `LogicException`, loud and named.
+ * An upcaster's own code threw, while migrating a payload or while answering `supports()`.
+ *
+ * Typical causes are a `TypeError` on a field the payload does not carry, a failed assertion, or a
+ * service that cannot even answer which steps it owns. The chain wraps both moments instead of letting
+ * them escape raw:
+ *
+ * - A raw `Throwable` reads as an infrastructure crash: on the outbox relay it would roll back the whole
+ *   drained batch and crash-loop the daemon.
+ *
+ * - The condition is the runtime incompatibility of a missing step, since this binary cannot decode the
+ *   row and a corrected deployment can, so it takes the same stalled disposition.
+ *
+ * - The wrap names the upcaster class and the step, where the underlying "undefined array key" names
+ *   neither the faulty service nor the event. The original failure stays as `previous`.
+ *
+ * It is a coding error to fix, hence a loud, named `LogicException`.
  *
  * @see UpcasterChain
  */

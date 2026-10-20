@@ -17,22 +17,21 @@ use function sprintf;
 /**
  * Every stored event carrying one of the given correlation ids, in `sequence_no` order.
  *
- * A NAMED question, not an escape hatch, and the distinction is the whole reason this lives in
- * Chronicler. `EventFeedFilter` refuses an arbitrary JSON predicate on purpose and hands that role
- * to a caller-owned filter; this one carries a single fixed clause on a promoted trace header the
- * store INDEXES itself, so the predicate finally sits in the layer that already committed to
- * serving it. Nothing here is caller-shaped: no column choice, no operator, no path.
+ * It answers one named question, which is why it lives in Chronicler. `EventFeedFilter` refuses an
+ * arbitrary JSON predicate and leaves that role to a caller-owned filter; this one carries a single
+ * fixed clause on a promoted trace header that the store indexes itself, so the predicate sits in the
+ * layer that already committed to serving it. Nothing here is caller-shaped: no column choice, no
+ * operator, no path.
  *
- * The rendered form is load-bearing and is not free to change. `EventStoreSchema` ships
- * `event_store_correlation_idx` on `header #>> '{__correlation_id}'`. The fixed path is rendered
- * from `Header::CorrelationId` as that literal expression, so PostgreSQL matches the index under
- * custom and generic plans. The `->>` key form returns identical text, matches the index NOTHING,
- * and scans the whole store while every result still looks right; a comparison against a column
- * pinned `COLLATE "C"` misses it the same way.
+ * The rendered form must not change. `EventStoreSchema` ships `event_store_correlation_idx` on
+ * `header #>> '{__correlation_id}'`, and the fixed path is rendered from `Header::CorrelationId` as
+ * that literal expression, so PostgreSQL matches the index under custom and generic plans. The `->>`
+ * key form returns identical text, misses the index entirely and scans the whole store while every
+ * result still looks right; a comparison against a column pinned `COLLATE "C"` misses it the same way.
  *
- * The set form is the contract, not a convenience: a lineage is resolved where it is known and
- * passed in whole. This filter traces the ids it is GIVEN and claims nothing beyond them, so it
- * never means "the whole tree" in one application and "one instance" in another.
+ * The set form is the contract: a lineage is resolved where it is known and passed in whole. The
+ * filter traces the ids it is given and claims nothing beyond them, so it never means "the whole tree"
+ * in one application and "one instance" in another.
  *
  * @see EventStoreSchema the index this spelling must keep matching
  */
@@ -41,7 +40,7 @@ final readonly class CorrelationFeedFilter implements QueryFilter
     /**
      * @param  list<string>  $correlationIds  matched by equality against the bound set; the filter
      *                                        validates its own emptiness rather than trusting a caller
-     *                                        the analyser cannot see
+     *                                        the analyzer cannot see
      *
      * @throws InvalidArgumentException when the id set is empty or the limit is not positive; either
      *                                  case renders an empty trace that no caller means
@@ -59,9 +58,6 @@ final readonly class CorrelationFeedFilter implements QueryFilter
         }
     }
 
-    /**
-     * {@inheritDoc}
-     */
     #[Override]
     public function apply(QueryBuilder $qb): void
     {

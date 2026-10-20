@@ -32,8 +32,8 @@ final class EventRecordTest extends TestCase
     #[Test]
     public function event_refuses_an_envelope_that_does_not_wrap_a_domain_event(): void
     {
-        // the @throws every reader declares, renderers and projections: a corrupt read or a misuse
-        // surfaces loud, never a TypeError deep in a fold
+        // the throws clause every reader declares, renderers and projections: a corrupt read or a
+        // misuse surfaces loud, never a `TypeError` deep in a fold
         $record = new EventRecord(
             new Message(new stdClass),
             SequencePosition::fromInt(1),

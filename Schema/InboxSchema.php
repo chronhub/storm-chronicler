@@ -7,12 +7,10 @@ namespace Storm\Chronicler\Schema;
 /**
  * Raw PostgreSQL DDL for `es_inbox`, the consumer-side deduplication log.
  *
- * One row per `(consumer_id, message_id)` marks that pair as already handled, the consumer as the
- * id `es_inbox_consumers` gave its name and the message id in its binary form. Message-bus middleware
+ * One row per `(consumer_id, message_id)` marks that pair as already handled. Message-bus middleware
  * inserts the row in the same transaction as the handler's effects, atomically, so a redelivery of an
- * already-processed message is a no-op. The composite key is `(consumer_id, message_id)`, not
- * `message_id` alone, so the same event fanned out to several transports or consumers is deduplicated
- * per consumer, not globally.
+ * already-processed message is a no-op. The key is the pair rather than `message_id` alone, so the same
+ * event fanned out to several transports or consumers is deduplicated per consumer, not globally.
  *
  * `consumer_id` names the receiving transport through `es_inbox_consumers`, and `message_id` is the
  * binary form of the message id, sixteen bytes for a uuid and thirty-two for a hashed text; the
@@ -41,8 +39,9 @@ final class InboxSchema
                 SQL,
             // `message_id` is the binary form of the id, 16 bytes for a uuid and 32 for a hashed
             // text, never its characters: the key is what a proof costs, in the tuple and again in
-            // the primary index. The registry is not a foreign key: a proof is written on every
-            // consumed message, and the registry's row for a live consumer never goes away.
+            // the primary index. `consumer_id` carries no foreign key to the registry: a proof is
+            // written on every consumed message, and the registry's row for a live consumer never
+            // goes away.
             /* language=PostgreSQL */
             <<<'SQL'
                 CREATE TABLE IF NOT EXISTS es_inbox (
@@ -56,12 +55,12 @@ final class InboxSchema
                     CONSTRAINT es_inbox_key_length_chk CHECK (octet_length(message_id) = ANY (ARRAY[16, 32]))
                 )
                 SQL,
-            // An additive drift converges on a re-install: a CHECK dropped by hand between two
-            // installs comes back, guarded, because CREATE TABLE IF NOT EXISTS no-ops on a live
-            // table. No column is altered here: a table of another SHAPE is refused by the conformance
-            // probe, never migrated. The guard reads the constraint on THIS relation: pg_constraint
+            // An additive drift converges on a re-install: a `CHECK` dropped by hand between two
+            // installs comes back, guarded, because `CREATE TABLE IF NOT EXISTS` no-ops on a live
+            // table. No column is altered here: a table of another shape is refused by the conformance
+            // probe, never migrated. The guard reads the constraint on this relation: `pg_constraint`
             // spans the database, and a sibling schema carrying the same name would otherwise hide
-            // the missing CHECK here.
+            // the missing `CHECK` here.
             /* language=PostgreSQL */
             <<<'SQL'
                 DO $$

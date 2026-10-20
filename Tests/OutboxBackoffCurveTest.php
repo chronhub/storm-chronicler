@@ -25,10 +25,10 @@ final class OutboxBackoffCurveTest extends TestCase
     #[DataProvider('curve')]
     public function the_backoff_curve_stays_capped_beyond_the_representable_range(int $attempts, int $window): void
     {
-        // the saga relay's sibling carries the same arithmetic: the cap must apply to the FLOAT
-        // before the cast, or a large yet accepted max_attempts collapses the capped exponential
-        // to the one-second floor. Equal-jittered on top: the delay lands in the window's upper
-        // half, never above it, so the curve's shape is a RANGE per attempt, not a single value.
+        // the saga relay's sibling carries the same arithmetic: the cap must apply to the float
+        // before the cast, or a large yet accepted `max_attempts` collapses the capped exponential
+        // to the one-second floor. Equal jitter on top lands the delay in the window's upper half,
+        // never above it, so the curve gives a range per attempt rather than a single value.
         $relay = new OutboxRelay(
             $this->createStub(Connection::class),
             new StoredEventReader(new DefaultMessageSerializer, new IdentityEventTypeMapper, new UpcasterChain),
@@ -68,11 +68,11 @@ final class OutboxBackoffCurveTest extends TestCase
     #[Test]
     public function the_floor_holds_a_degenerate_zero_base_at_one_second(): void
     {
-        // the floor is not decoration: a zero base, constructible standalone, would otherwise
-        // compute a zero delay and hammer the downstream with no pause at all. The window is 1
-        // here, jitter's own degenerate case, halving it to 0 before the floor would let the draw
-        // land on zero half the time; sampled, not asserted once, since a single draw only catches
-        // that the half the time it lands on the wrong half.
+        // the floor carries load: a zero base, constructible standalone, would otherwise compute a
+        // zero delay and retry the downstream with no pause at all. The window is 1 here, jitter's
+        // own degenerate case: halving it to 0 before the floor would let the draw land on zero half
+        // the time, so the delay is sampled rather than asserted once, a single draw catching that
+        // only when it lands on the wrong half.
         $relay = new OutboxRelay(
             $this->createStub(Connection::class),
             new StoredEventReader(new DefaultMessageSerializer, new IdentityEventTypeMapper, new UpcasterChain),
@@ -91,9 +91,9 @@ final class OutboxBackoffCurveTest extends TestCase
     #[Test]
     public function the_jittered_delay_actually_jitters_below_the_window_top(): void
     {
-        // the in-window bounds above cannot see a dead jitter (a constant full-window delay sits
-        // inside them): sample the delay and require a draw BELOW the top. P(30 draws all landing
-        // on the single top value of a 501-wide half-window) ≈ (1/501)^30, not a flake source.
+        // the in-window bounds above cannot see a dead jitter, since a constant full-window delay
+        // sits inside them: sample the delay and require a draw below the top. Thirty draws all on
+        // the single top value of a 501-wide half-window have probability `(1/501)^30`, no flake.
         $relay = new OutboxRelay(
             $this->createStub(Connection::class),
             new StoredEventReader(new DefaultMessageSerializer, new IdentityEventTypeMapper, new UpcasterChain),
@@ -116,9 +116,9 @@ final class OutboxBackoffCurveTest extends TestCase
     public function the_jittered_delay_never_falls_below_the_window_half(): void
     {
         // the floor needs sampling too, for the mirror reason: a widened lower bound still lands
-        // inside the window most of the time, so a single draw sees it only when the draw happens
-        // to fall in the widened part. P(60 draws all missing a quarter-sized gap) = 0.75^60,
-        // about one in thirty million; the true floor holds on EVERY draw, so this cannot flake.
+        // inside the window most of the time, so a single draw sees it only when the draw happens to
+        // fall in the widened part. Sixty draws all miss a quarter-sized gap with probability
+        // `0.75^60`, about one in thirty million; the true floor holds on every draw, so no flake.
         $relay = new OutboxRelay(
             $this->createStub(Connection::class),
             new StoredEventReader(new DefaultMessageSerializer, new IdentityEventTypeMapper, new UpcasterChain),

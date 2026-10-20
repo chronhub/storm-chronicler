@@ -10,26 +10,33 @@ use Doctrine\DBAL\Query\QueryBuilder;
 use Storm\Stream\StreamName;
 
 /**
- * The query lane's windowed feed read: events under one stream scope and/or event-type set, with the
- * position window and page size stamped by the runner. The checkpoint-less, mutable pendant of
- * {@see ProjectionFilter}, the same lean `sequence_no` / `category` shape, plus an optional exact
- * `stream` narrow and `type` set, but {@see \Storm\Projector\Query\QueryProjectionRunner::stream()} pages
- * it via `window()`: `window()` advances `(after, head]` and caps the read, `apply()` emits it.
+ * The query lane's windowed feed read: events under one stream scope, one event-type set, or both.
+ *
+ * It is the checkpoint-less, mutable counterpart of `ProjectionFilter`: the same lean `sequence_no` and
+ * `category` shape, plus an optional exact `stream` narrow and `type` set. The runner stamps the
+ * position window and page size: {@see \Storm\Projector\Query\QueryProjectionRunner::stream()} pages
+ * it, `window()` advancing `(after, head]` and capping the read, then `apply()` emitting it.
  *
  * `WHERE sequence_no > :after AND sequence_no <= :head [AND category = :cat] [AND stream = :stream]
  * [AND type IN (…)] ORDER BY sequence_no ASC LIMIT :limit`.
  *
- * The scope is a single {@see \Storm\Stream\StreamName}, not a separate category and stream: `category` is
- * `split_part(stream, '-', 1)`, enforced by a DB CHECK, so the two can never legitimately diverge;
- * the VO makes that unrepresentable. A bare `StreamName('account')` scopes to the whole category; a
- * qualified `StreamName('account')->withQualifier($id)` scopes to one aggregate. `exactStream` also
- * narrows a bare name to that exact stream, without changing the default category selection. Both predicates are
- * still emitted when qualified: `category` is the partition-prune key and the leading column of the
- * `UNIQUE (category, stream, version)` index, redundant in data but load-bearing in the plan.
+ * The scope is a single `StreamName` rather than a separate category and stream: `category` is
+ * `split_part(stream, '-', 1)`, enforced by a database `CHECK`, so the two can never legitimately
+ * diverge, and the value object makes that unrepresentable.
  *
- * Deliberately no JSON `header` or `content` predicate: an arbitrary predicate is the escape hatch, a
- * caller-owned {@see QueryFilter} via the runner's one-shot `run()`, for example an `InspectFilter`
- * from the optional LiveQuery package. This filter stays LiveQuery-free, Chronicler layer only.
+ * - A bare `StreamName('account')` scopes to the whole category.
+ * - A qualified `StreamName('account')->withQualifier($id)` scopes to one aggregate.
+ *
+ * - `exactStream` narrows a bare name to that exact stream, without changing the default category
+ *   selection.
+ *
+ * A qualified scope still emits both predicates: `category` is the partition-prune key and the leading
+ * column of the `UNIQUE (category, stream, version)` index, redundant in data but needed by the plan.
+ *
+ * The filter carries no JSON `header` or `content` predicate. An arbitrary predicate belongs to a fetch
+ * that renders, such as an `InspectFilter` from the optional LiveQuery package, which no runner folds;
+ * a fold over another selection takes a caller-built `MutableQueryFilter` that honors the stamped
+ * window. This filter stays free of LiveQuery, in the Chronicler layer only.
  */
 final class EventFeedFilter implements MutableQueryFilter
 {
@@ -41,8 +48,8 @@ final class EventFeedFilter implements MutableQueryFilter
 
     /**
      * @param  StreamName|null  $scope  null selects every stream; a bare category selects the whole
-     *                                  category unless `exactStream` is true; a qualified name selects one exact stream, a category
-     *                                  prune plus a stream narrow
+     *                                  category unless `exactStream` is true; a qualified name selects
+     *                                  one exact stream, a category prune plus a stream narrow
      * @param  list<string>|null  $types  stored type strings, alias-resolved by the caller; null or
      *                                    `[]` selects all types with no `type` clause
      */
@@ -69,7 +76,7 @@ final class EventFeedFilter implements MutableQueryFilter
             ->setParameter('feedHead', $this->head, ParameterType::INTEGER);
 
         if ($this->scope !== null) {
-            $qb->andWhere('e.category = :feedCategory')->setParameter('feedCategory', $this->scope->category);
+            $qb->andWhere('e.category = :feedCategory')->setParameter('feedCategory', $this->scope->category->value);
 
             if ($this->exactStream || $this->scope->qualifier !== null) {
                 $qb->andWhere('e.stream = :feedStream')->setParameter('feedStream', $this->scope->toString());

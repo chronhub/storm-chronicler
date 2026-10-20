@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace Storm\Chronicler\Evolution;
 
 /**
- * Transforms one stored event payload up by a single schema version, from `(alias, vN)` to
- * `vN+1`.
+ * Migrates one stored event payload up a single schema version, from `(alias, vN)` to `vN+1`.
  *
- * Pure data migration, array to array: the UpcasterChain applies the matching upcasters in order,
- * from the stored `event_version` to the type's current version, before the event object is
+ * It is a pure data migration, array to array: the `UpcasterChain` applies the matching upcasters in
+ * order, from the stored `event_version` to the type's current version, before the event object is
  * rebuilt from the payload. An upcaster is a service; tag it with `#[AsUpcaster]`.
  *
  * @see UpcasterChain

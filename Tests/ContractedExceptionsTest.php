@@ -27,9 +27,10 @@ use Storm\Contracts\Chronicler\UnknownEventType as UnknownEventTypeContract;
 use Throwable;
 
 /**
- * The exception seam of the Chronicler ports: each port's throws clause names a Contracts-owned
- * interface, the implementation hierarchy carries it, so code written against the ports catches
- * domain types without knowing this package.
+ * The exception seam of the Chronicler ports.
+ *
+ * Each port's throws clause names a Contracts-owned interface and the implementation hierarchy
+ * carries it, so code written against the ports catches domain types without knowing this package.
  */
 final class ContractedExceptionsTest extends TestCase
 {
@@ -72,7 +73,8 @@ final class ContractedExceptionsTest extends TestCase
         $failure = StorageFailure::wrap('the stream-head read', $cause);
 
         $this->assertInstanceOf(StorageFailureContract::class, $failure);
-        $this->assertNotInstanceOf(RetryableException::class, $failure); // non-transient cause, so a plain failure
+        // non-transient cause, so a plain failure
+        $this->assertNotInstanceOf(RetryableException::class, $failure);
         $this->assertSame($cause, $failure->getPrevious());
         $this->assertStringContainsString('the stream-head read', $failure->getMessage());
         $this->assertStringContainsString('connection lost', $failure->getMessage());
@@ -95,8 +97,8 @@ final class ContractedExceptionsTest extends TestCase
     #[Test]
     public function every_contracted_failure_rolls_up_to_the_module_umbrella(): void
     {
-        // the high-level catch net: any contracted Chronicler failure IS a ChroniclerExceptionContract;
-        // break a leaf's `extends ChroniclerExceptionContract` and this fails.
+        // the high-level catch: every contracted Chronicler failure is a `ChroniclerExceptionContract`,
+        // so breaking a leaf's `extends ChroniclerExceptionContract` fails this
         $this->assertInstanceOf(ChroniclerExceptionContract::class, StaleVersion::forStream('order-1', 1, 2));
         $this->assertInstanceOf(ChroniclerExceptionContract::class, DuplicateVersion::forStream('order-1'));
         $this->assertInstanceOf(ChroniclerExceptionContract::class, UnknownEventType::cannotResolve('order.placed'));
@@ -108,13 +110,13 @@ final class ContractedExceptionsTest extends TestCase
      * The umbrella's own sentence, held to the ports rather than to a list.
      *
      * The five assertions above name instances by hand, so they prove the leaves they mention and
-     * nothing about the ones nobody thought of; the root's claim is UNIVERSAL, every failure the module
-     * lets cross its boundary, and a universal cannot be tested by enumeration. Six types had crossed
-     * for months while the sentence stood, one of them forcing a sibling module to import four concrete
-     * classes to rebuild a classification the contracts layer was supposed to carry.
+     * nothing about the ones nobody thought of. The root's claim is universal, every failure the
+     * module lets cross its boundary, and a universal cannot be tested by enumeration: an uncovered
+     * type crosses unnoticed, and a sibling module ends up importing concrete classes to rebuild a
+     * classification the contracts layer should carry.
      *
-     * A declared tail is the one exemption, and it is not a loophole: `Throwable` says in so many words
-     * that the port grants no exhaustiveness there, which is the opposite of a silent escape.
+     * A declared tail is the one exemption: `Throwable` says in so many words that the port grants no
+     * exhaustiveness there, the opposite of a silent escape.
      */
     #[Test]
     #[Group('adversarial')]
@@ -134,9 +136,9 @@ final class ContractedExceptionsTest extends TestCase
                     continue;
                 }
 
-                // Another module's contracted root, re-exposed rather than originated: a serialization,
-                // clock or stream failure travels under ITS OWN umbrella, which is the same promise one
-                // package over. What the rule forbids is a CONCRETE crossing under no umbrella at all.
+                // another module's contracted root, re-exposed rather than originated: a serialization,
+                // clock or stream failure travels under its own umbrella, the same promise one package
+                // over. What the rule forbids is a concrete crossing under no umbrella at all
                 if (str_starts_with($type, 'Storm\\Contracts\\') || self::carriesAContract($type)) {
                     continue;
                 }

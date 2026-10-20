@@ -23,28 +23,31 @@ use function implode;
 use function sort;
 
 /**
- * Default BatchInboxStore: records every `(consumer, message_id)` and runs each handler inside one
- * DBAL transaction, with the whole batch's dedup rows written by a single multi-VALUES INSERT.
+ * The default `BatchInboxStore`, recording and running a whole batch in one DBAL transaction.
  *
- * The dedup gate is `INSERT … ON CONFLICT DO NOTHING RETURNING message_id`, the keys in hex both ways: the
- * RETURNING set contains exactly the rows that were actually inserted, the fresh messages. A key absent from the set was
- * already recorded, in an earlier batch or an earlier occurrence in THIS batch; `DO NOTHING` also
- * absorbs an intra-statement duplicate, unlike `DO UPDATE` which would refuse to affect a row twice.
- * Handlers then run in delivery order, never in RETURNING order; a fresh id is consumed on use so a
- * duplicate inside the batch runs its first occurrence only, the exact per-row behavior minus N-1
- * round-trips.
+ * The batch's deduplication rows go in by a single multi-`VALUES` `INSERT`, and the gate is
+ * `INSERT … ON CONFLICT DO NOTHING RETURNING message_id`, the keys in hex both ways:
  *
- * Skipped occurrences update `duplicates` and `last_duplicate_at` by encoded key in bounded
- * statements within the same transaction; a failing handler rolls those observations back too.
+ * - The `RETURNING` set holds exactly the rows actually inserted, the fresh messages; a key absent from
+ *   it was already recorded, in an earlier batch or earlier in this batch.
  *
- * All handlers run inside the shared transaction, so all N handlers' effects on the default connection
- * and all N inbox rows commit together in one COMMIT, one fsync on a durable cluster. A throw from any
- * handler rolls back the whole batch, including the dedup rows and the effects of the items that
- * already succeeded in it, so nothing is half-applied and the caller reprocesses on redelivery.
+ * - `DO NOTHING` also absorbs a duplicate within the statement, where `DO UPDATE` would refuse to affect
+ *   a row twice.
  *
- * Batches larger than {@see InsertChunk::ROWS} are split into several statements in the same
- * transaction: the chunk is a safety rail against the pdo_pgsql parameter ceiling, not a tuning knob,
- * and no real caller with prefetch-bounded batches comes near it.
+ * - Handlers run in delivery order, never in `RETURNING` order. A fresh id is consumed on use, so a
+ *   duplicate inside the batch runs its first occurrence only, the exact per-row behavior minus N-1
+ *   round trips.
+ *
+ * Skipped occurrences update `duplicates` and `last_duplicate_at` by encoded key in bounded statements
+ * within the same transaction; a failing handler rolls those observations back too.
+ *
+ * All handlers share the transaction, so their effects on the default connection commit with all N
+ * inbox rows, and a throw from any handler also rolls back the effects of the items that already
+ * succeeded: nothing is half-applied.
+ *
+ * Batches larger than `InsertChunk::ROWS` split into several statements in the same transaction: the
+ * chunk is a safety rail against the pdo_pgsql parameter ceiling, not a tuning knob, and no real caller
+ * with prefetch-bounded batches comes near it.
  *
  * @see DbalInboxStore the per-message sibling
  */
@@ -67,7 +70,7 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
             return [];
         }
 
-        // resolved BEFORE the transaction, so a first registration autocommits and is cacheable
+        // resolved before the transaction, so a first registration autocommits and is cacheable
         $consumerId = $this->consumers->id($consumer);
 
         return $this->connection->transactional(
@@ -86,9 +89,9 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
                         continue;
                     }
 
-                    // Consume on use, BY KEY: an intra-batch duplicate, or two spellings of one id
+                    // Consume on use, by key: an intra-batch duplicate, or two spellings of one id
                     // that encode to one key, find it already spent and are reported false, exactly
-                    // like the per-row ON CONFLICT gate would answer.
+                    // like the per-row `ON CONFLICT` gate would answer.
                     unset($fresh[$key]);
 
                     ($item->handler)();
@@ -156,7 +159,8 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
             static fn (string $messageId): string => bin2hex(InboxKey::encode($messageId)),
             array_column($items, 'messageId', 'messageId'),
         );
-        // @infection-ignore-all; equivalent: `sort()` below reindexes the list itself
+        // equivalent: `sort()` below reindexes the list itself
+        // @infection-ignore-all
         $sortedKeys = array_values($keys);
         sort($sortedKeys, SORT_STRING);
 
@@ -164,15 +168,16 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
         foreach (array_chunk($sortedKeys, InsertChunk::ROWS) as $chunk) {
             $params = array_merge(...array_map(static fn (string $key): array => [$consumerId, $key], $chunk));
 
-            // @infection-ignore-all; equivalent: `implode()` joins by value, so the start index of the
+            // equivalent: `implode()` joins by value, so the start index of the
             // filled list, the only mutable number of this statement, changes nothing it renders
+            // @infection-ignore-all
             $placeholders = $chunk
                     |> count(...)
                     |> (static fn ($x) => array_fill(0, $x, "(?, decode(?, 'hex'))"))
                     |> (static fn ($x) => implode(', ', $x));
 
             $inserted = $tx->fetchFirstColumn(
-                // the conflict target is NAMED: only the dedup key may absorb a violation into
+                // the conflict target is named: only the dedup key may absorb a violation into
                 // "already processed"; any future constraint on the table stays loud
                 /* language=PostgreSQL */
                 'INSERT INTO es_inbox (consumer_id, message_id) VALUES '.$placeholders.'
@@ -181,8 +186,9 @@ final readonly class DbalBatchInboxStore implements BatchInboxStore
                 $params,
             );
 
-            // @infection-ignore-all; equivalent: a set of the hex keys `RETURNING` hands back as text,
+            // equivalent: a set of the hex keys `RETURNING` hands back as text,
             // read by `isset()` alone, so neither the cast nor the value is observable
+            // @infection-ignore-all
             $fresh += array_fill_keys(array_map(static fn (mixed $key): string => (string) $key, $inserted), true);
         }
 

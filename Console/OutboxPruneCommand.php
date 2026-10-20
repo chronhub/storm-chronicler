@@ -7,7 +7,7 @@ namespace Storm\Chronicler\Console;
 use Doctrine\DBAL\Exception;
 use Override;
 use Storm\Chronicler\Outbox\DbalOutboxWriter;
-use Storm\Clock\Duration;
+use Storm\Support\Console\DurationOption;
 use Storm\Support\Console\PositiveIntOption;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -17,17 +17,18 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 
 /**
- * Prunes the outbox archive, `es_outbox_archive` under `storm.outbox.disposal: archive`, older than
- * --before, purely by `archived_at` age; the cold table's retention, a no-op under `delete` disposal.
- * The HOT table needs no retention: a published row is disposed of at drain time, so `es_outbox` only
- * holds in-flight work plus the dead-letter, which `storm:outbox:failed` owns.
+ * Prunes the outbox archive, `es_outbox_archive` under `storm.outbox.disposal: archive`, by age.
  *
- * Batched: LIMIT-capped DELETEs so it never holds a long lock. Cannot race the live relay, which only
- * ever INSERTs into the archive via the atomic move. Idempotent.
+ * Rows older than `--before` go, by `archived_at` alone: the cold table's retention, a no-op under
+ * `delete` disposal. The hot table needs no retention: a published row is disposed of at drain time, so
+ * `es_outbox` only holds in-flight work plus the dead-letter, which `storm:outbox:failed` owns.
  *
- * --before <30d|48h|90m> is required, so there is no accidental prune-all; --dry-run counts without
- * deleting; --batch caps each statement. Overlap prevention is the scheduler's job, backup the
- * operator's. The events themselves live in event_store and are never touched.
+ * The prune runs in `LIMIT`-capped deletes so it never holds a long lock, and is idempotent. It cannot
+ * race the live relay, which only ever inserts into the archive through the atomic move.
+ *
+ * `--before <30d|48h|90m>` is required, so there is no accidental prune-all; `--dry-run` counts without
+ * deleting; `--batch` caps each statement. Overlap prevention is the scheduler's job, backup the
+ * operator's. The events themselves live in `event_store` and are never touched.
  *
  * Examples:
  *
@@ -56,19 +57,16 @@ final class OutboxPruneCommand extends Command
     /**
      * {@inheritDoc}
      *
-     * @throws Exception on a DBAL failure of the count / delete
+     * @throws Exception on a DBAL failure of the count or the delete
      */
     #[Override]
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
 
-        $before = $input->getOption('before');
-        $duration = Duration::fromString(is_string($before) ? $before : '');
-        if ($duration === null) {
-            $io->error('Specify --before with an age, e.g. --before 7d (suffixes: d=days, h=hours, m=minutes).');
-
-            return Command::INVALID;
+        $duration = DurationOption::required($input, $io, 'before');
+        if (is_int($duration)) {
+            return $duration;
         }
         $age = $duration->seconds;
 

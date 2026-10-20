@@ -135,8 +135,8 @@ final class CatalogueRenameProofTest extends TestCase
             self::assertSame(strlen($currentJson), file_put_contents($currentPath, $currentJson));
             $console = new CommandTester(new MessageCheckCommand(new CatalogueCompatibility($chain)));
             $status = $console->execute(['baseline' => $baselinePath, 'current' => $currentPath], ['interactive' => false]);
-            // the proof record rides the assertion messages, never STDERR, where it would kill the
-            // initial pass of every mutation gate that runs this suite
+            // the proof record travels in the assertion messages, never STDERR, where it would fail
+            // the initial pass of every mutation gate that runs this suite
             $record = json_encode([
                 'before' => $before,
                 'after' => $after,

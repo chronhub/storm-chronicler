@@ -10,9 +10,11 @@ use Storm\Message\EventType;
 use Storm\Message\HasConstructablePayload;
 
 /**
- * Current v2 shape of a MARKED event whose v1 payload had no `channel`; exercises the whole read
- * chain of crypto-shredding: the upcaster migrates the shape while `full_name` rides through as an
- * opaque envelope, and the ciphering codec renders it, or its fallback, only at deserialize.
+ * Current v2 shape of a marked event whose v1 payload had no `channel`.
+ *
+ * It exercises the whole read chain of crypto-shredding: the upcaster migrates the shape while
+ * `full_name` passes through as an opaque envelope, and the ciphering codec renders it, or its
+ * fallback, only at deserialize.
  */
 #[EventType('test.personal_upcast', version: 2)]
 #[Personal(subject: 'customer_id', keys: ['full_name'], fallback: ['full_name' => '⌫'])]

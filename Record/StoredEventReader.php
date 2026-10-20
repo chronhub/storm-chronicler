@@ -12,17 +12,17 @@ use Storm\Contracts\Chronicler\UndecodableRow;
 use Storm\Contracts\Message\DomainEvent;
 use Storm\Message\Header;
 use Storm\Message\Message;
+use Storm\Serializer\AliasBoundMessageSerializer;
 use Storm\Serializer\Exception\SerializationException;
 use Storm\Serializer\MessageSerializer;
 use Storm\Serializer\SerializedMessage;
 
 /**
- * Rebuilds a Message from a stored event row, the single source of truth for upcast-on-read.
+ * Rebuilds a `Message` from a stored event row, the single source of truth for upcast-on-read.
  *
- * Shared by the read path, EventRowCodec::fromRow, which then wraps the message in an
- * EventRecord, and the republished path, OutboxRelay, which publishes the bare message. Both MUST
- * decode and resolve the type and upcast identically; keeping it in one place stops the two from
- * drifting, for example a fix to the upcast applied on only one side.
+ * The read path, `EventRowCodec::fromRow()`, wraps the message in an `EventRecord`; the republish path,
+ * `OutboxRelay`, publishes the bare message. Both must decode, resolve the type and upcast identically,
+ * and one shared place keeps them from drifting, such as a fix to the upcast applied on one side only.
  *
  * @see EventRowCodec::fromRow()
  * @see EventRecord
@@ -34,8 +34,9 @@ final readonly class StoredEventReader
         private MessageSerializer $serializer,
         private EventTypeMapper $eventTypeMapper,
         /**
-         * REQUIRED, no empty default: the chain is stored-event MEANING, and a composition that
-         * silently reads un-upcast rows is the drift this refuses; a caller states its identity.
+         * Required, with no empty default: the chain defines what a stored event means, and a
+         * composition that silently reads un-upcast rows is the drift this refuses. A caller states
+         * its identity.
          */
         private UpcasterChain $upcasters,
     ) {}
@@ -43,7 +44,8 @@ final readonly class StoredEventReader
     /**
      * @param  array<string, mixed>  $row  a stored row exposing `type`, `event_version`, `header`, `content`
      *
-     * @throws SerializationException when the stored row is malformed, or the event type is not deserializable
+     * @throws SerializationException when the stored row is malformed, or the event type is not
+     *                                deserializable
      * @throws UnknownEventType when the stored `type` resolves to no known class, or to a class
      *                          that is not a domain event
      * @throws UndecodableRow when this runtime cannot decode a stored row, a missing or duplicated
@@ -57,17 +59,19 @@ final readonly class StoredEventReader
     }
 
     /**
-     * The rebuilt message TOGETHER with the stored payload as written, pre-upcast, personal keys
-     * still ciphered. The read path threads the pair into `EventRecord::$storedContent` so the
-     * inspection surfaces can render personal keys as stored; a reference to the already-decoded
-     * content, never a copy.
+     * The rebuilt message, paired with the stored payload as written.
      *
-     * Same contract as {@see toMessage()}, same throws.
+     * The stored payload is pre-upcast, with personal keys still ciphered. The read path threads the
+     * pair into `EventRecord::$storedContent`, so the inspection surfaces render personal keys as
+     * stored; the payload references the already-decoded content and is never a copy.
+     *
+     * Same contract and same throws as `toMessage()`.
      *
      * @param  array<string, mixed>  $row  a stored row exposing `type`, `event_version`, `header`, `content`
      * @return array{Message, array<string, mixed>}
      *
-     * @throws SerializationException when the stored row is malformed, or the event type is not deserializable
+     * @throws SerializationException when the stored row is malformed, or the event type is not
+     *                                deserializable
      * @throws UnknownEventType when the stored `type` resolves to no known class, or to a class
      *                          that is not a domain event
      * @throws UndecodableRow when this runtime cannot decode a stored row, a missing or duplicated
@@ -77,27 +81,29 @@ final readonly class StoredEventReader
      */
     public function toMessageAndStored(array $row): array
     {
-        $serialized = SerializedMessage::fromRow($row); // validated once: type + decoded header/content
+        // validated once: the type, and the decoded header and content
+        $serialized = SerializedMessage::fromRow($row);
 
-        // The `type` column, an EventType alias, is the source of truth for the event class; feed it back
-        // as the `MessageType` header so the serializer can rebuild the object; SerializedMessage owns that rule.
+        // the `type` column, an `EventType` alias, is the source of truth for the event class; it goes
+        // back in as the `MessageType` header so the serializer can rebuild the object, a rule
+        // `SerializedMessage` owns
         $class = $this->eventTypeMapper->toClass($serialized->requireType());
 
         if (! is_a($class, DomainEvent::class, true)) {
-            // the store holds domain events exclusively; a stored type resolving to any OTHER loadable
-            // class, a restore or import artifact, is refused BEFORE its payload is hydrated. The
-            // mapper cannot carry this gate: the neutral wire resolves commands through the same
-            // toClass(). Riding the UnknownEventType lane keeps the relay dead-lettering the row
-            // instead of letting a foreign type escape the drain.
+            // the store holds domain events only: any other loadable class is a restore or import
+            // artifact, refused before its payload is hydrated. The mapper cannot hold this gate, since
+            // the neutral wire resolves commands through the same `toClass()`, and the
+            // `UnknownEventType` lane keeps the relay dead-lettering the row rather than a foreign
+            // type escaping the drain.
             throw UnknownEventType::notAnEvent($serialized->requireType(), $class);
         }
 
         $header = SerializedMessage::internalizeType($serialized->header, $class);
 
-        // Restore the source stream id on the read side so a read event knows its own stream, and hence its
-        // category, split on the first `-`. Both durable reads provide it: the event-store `stream`
-        // column, and the outbox relay's `partition_key AS stream` alias, the same value under its ordering name;
-        // the guard stays for any caller feeding rows without it.
+        // restore the source stream on the read side, so a read event knows its stream and so its
+        // category, split on the first `-`. Both durable reads provide it, the event-store `stream`
+        // column and the relay's `partition_key AS stream` alias, the same value under its ordering
+        // name; the guard stays for a caller feeding rows without it.
         if (isset($row['stream'])) {
             $header[Header::StreamName->value] = (string) $row['stream'];
         }
@@ -111,6 +117,13 @@ final readonly class StoredEventReader
             $serialized->content,
         );
 
-        return [$this->serializer->deserialize(['header' => $header, 'content' => $content]), $serialized->content];
+        // the stored `type` column, not an alias recomputed from the class: it is the value the row was
+        // written with, so an envelope bound to it opens even after the alias map moved on
+        $data = ['header' => $header, 'content' => $content];
+        $message = $this->serializer instanceof AliasBoundMessageSerializer
+            ? $this->serializer->deserializeStored($data, $serialized->requireType())
+            : $this->serializer->deserialize($data);
+
+        return [$message, $serialized->content];
     }
 }

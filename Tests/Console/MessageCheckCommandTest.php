@@ -16,6 +16,7 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
 use Throwable;
 
+use function is_array;
 use function json_encode;
 use function str_replace;
 use function sys_get_temp_dir;
@@ -23,13 +24,13 @@ use function tempnam;
 use function unlink;
 
 /**
- * The command's own layer: what it does with a document it cannot read, which is the half the rules
- * below it never see.
+ * The command's own layer: what it does with a document it cannot read.
  *
- * Refusing to JUDGE and judging INCOMPATIBLE are different answers that share an exit code, so the
- * message is the only thing telling them apart, and a reader acts on them differently: one is a
- * contract to fix, the other a document to regenerate. A command that returned the compatibility
- * wording for an unreadable file would send someone hunting a break that is not there.
+ * The rules below the command never see that half. Refusing to judge and judging incompatible are
+ * different answers that share an exit code, so the message alone tells them apart, and a reader
+ * acts on them differently: one is a contract to fix, the other a document to regenerate. A command
+ * that returned the compatibility wording for an unreadable file would send someone hunting a break
+ * that is not there.
  */
 final class MessageCheckCommandTest extends TestCase
 {
@@ -198,6 +199,128 @@ final class MessageCheckCommandTest extends TestCase
         self::assertStringContainsString('checked message declarations are compatible', self::flat($tester));
     }
 
+    #[Test]
+    #[DataProvider('schemaVersions')]
+    public function a_removed_command_alias_without_replaces_is_refused(int $schemaVersion): void
+    {
+        // the class stays, its alias changes: every pending outbox row still carries the former alias
+        $tester = $this->check(
+            $this->catalogue([], $schemaVersion, ['billing.charge' => $this->command()]),
+            $this->catalogue([], $schemaVersion, ['payments.charge' => $this->command()]),
+        );
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('would break a store', self::flat($tester), 'a verdict on the contract, not a refusal to read the document');
+        self::assertStringContainsString('billing.charge', self::flat($tester));
+    }
+
+    #[Test]
+    #[DataProvider('schemaVersions')]
+    public function a_current_catalogue_without_the_commands_its_baseline_lists_is_not_judged(int $schemaVersion): void
+    {
+        // a document written by a binary older than its baseline, as after a rollback: it says nothing of
+        // the commands, which is not the same as declaring none
+        $tester = $this->check(
+            $this->catalogue([], $schemaVersion, ['billing.charge' => $this->command()]),
+            $this->catalogue([], $schemaVersion),
+        );
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('was not judged', self::flat($tester));
+        self::assertStringNotContainsString('would break a store', self::flat($tester), 'a document that is silent is not a contract that broke');
+    }
+
+    #[Test]
+    #[DataProvider('schemaVersions')]
+    public function a_command_alias_kept_in_replaces_passes(int $schemaVersion): void
+    {
+        $tester = $this->check(
+            $this->catalogue([], $schemaVersion, ['billing.charge' => $this->command()]),
+            $this->catalogue([], $schemaVersion, ['payments.charge' => $this->command(['billing.charge'])]),
+        );
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), self::flat($tester));
+    }
+
+    #[Test]
+    public function a_dropped_command_replaces_entry_is_refused_and_named(): void
+    {
+        $tester = $this->check(
+            $this->catalogue([], commands: ['payments.charge' => $this->command(['billing.charge'])]),
+            $this->catalogue([], commands: ['payments.charge' => $this->command()]),
+        );
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('would break a store', self::flat($tester));
+        self::assertStringContainsString('command alias "billing.charge"', self::flat($tester));
+    }
+
+    #[Test]
+    #[DataProvider('schemaVersions')]
+    public function a_catalogue_without_a_commands_section_declares_none(int $schemaVersion): void
+    {
+        $silent = $this->catalogue([], $schemaVersion);
+
+        self::assertSame(Command::SUCCESS, $this->check($silent, $silent)->getStatusCode());
+        self::assertSame(
+            Command::SUCCESS,
+            $this->check($silent, $this->catalogue([], $schemaVersion, ['billing.charge' => $this->command()]))->getStatusCode(),
+            'the first catalogue that lists the commands compares with one written before the section existed',
+        );
+    }
+
+    /**
+     * @param  array<array-key, mixed>|string  $commands
+     */
+    #[Test]
+    #[DataProvider('malformedCommands')]
+    public function a_malformed_commands_section_is_not_judged(array|string $commands, string $location, string $reason): void
+    {
+        $invalid = $this->file((string) json_encode([
+            'schema_version' => CatalogueCompatibility::SCHEMA_VERSION,
+            'events' => (object) [],
+            'commands' => is_array($commands) ? (object) $commands : $commands,
+        ]));
+        $tester = $this->check($invalid, $this->catalogue([], commands: []));
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString($location, self::flat($tester));
+        self::assertStringContainsString($reason, self::flat($tester));
+        self::assertStringContainsString('was not judged', self::flat($tester));
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, mixed>|string, string, string}>
+     */
+    public static function malformedCommands(): iterable
+    {
+        yield 'not an object' => ['billing.charge', 'at commands:', 'must be a JSON object (received string)'];
+        yield 'blank alias' => [[' ' => ['class' => 'App\\Charge', 'replaces' => []]], 'commands[0]', 'alias cannot be empty'];
+        yield 'no class' => [['billing.charge' => ['replaces' => []]], 'commands["billing.charge"].class', 'field is required'];
+        yield 'replaces not a list' => [['billing.charge' => ['class' => 'App\\Charge', 'replaces' => 'x']], 'commands["billing.charge"].replaces', 'must be a list'];
+        yield 'blank former alias' => [['billing.charge' => ['class' => 'App\\Charge', 'replaces' => ['']]], 'commands["billing.charge"].replaces[0]', 'cannot be blank'];
+        yield 'own alias replaced' => [['billing.charge' => ['class' => 'App\\Charge', 'replaces' => ['billing.charge']]], 'commands["billing.charge"].replaces[0]', 'cannot replace its own alias'];
+    }
+
+    #[Test]
+    public function an_alias_claimed_by_an_event_and_a_command_is_not_judged(): void
+    {
+        $invalid = $this->catalogue(['billing.charge' => $this->entry()], commands: ['billing.charge' => $this->command()]);
+        $tester = $this->check($invalid, $invalid);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('commands["billing.charge"]: alias is already claimed at events["billing.charge"]', self::flat($tester));
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function schemaVersions(): iterable
+    {
+        yield 'format 1' => [1];
+        yield 'format 2' => [2];
+    }
+
     /**
      * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $events
      */
@@ -224,7 +347,12 @@ final class MessageCheckCommandTest extends TestCase
     }
 
     /**
-     * @return iterable<string, array{array<string, array{class: string, version: int, replaces: list<string>}>, string, string, bool}>
+     * @return iterable<string, array{
+     *     array<string, array{class: string, version: int, replaces: list<string>}>,
+     *     string,
+     *     string,
+     *     bool,
+     * }>
      */
     public static function ambiguousDeclarations(): iterable
     {
@@ -816,7 +944,12 @@ final class MessageCheckCommandTest extends TestCase
     }
 
     /**
-     * @return array{class: string, version: int, replaces: list<string>, personal: array{subject: string, keys: list<string>}}
+     * @return array{
+     *     class: string,
+     *     version: int,
+     *     replaces: list<string>,
+     *     personal: array{subject: string, keys: list<string>},
+     * }
      */
     private static function v2Entry(): array
     {
@@ -824,7 +957,11 @@ final class MessageCheckCommandTest extends TestCase
     }
 
     /**
-     * @return array{'App\\Customer': array{subject: string, keys: list<string>, fallbacks: array<string, mixed>}}
+     * @return array{'App\\Customer': array{
+     *     subject: string,
+     *     keys: list<string>,
+     *     fallbacks: array<string, mixed>,
+     * }}
      */
     private static function v2Map(): array
     {
@@ -834,7 +971,11 @@ final class MessageCheckCommandTest extends TestCase
     /**
      * @param  array<string, mixed>  $baseline
      * @param  array<string, mixed>  $current
-     * @param  array<string, array{subject: string, keys: list<string>, fallbacks: array<string, mixed>}>  $map
+     * @param  array<string, array{
+     *     subject: string,
+     *     keys: list<string>,
+     *     fallbacks: array<string, mixed>,
+     * }>  $map
      */
     private function checkV2(array $baseline, array $current, array $map, int $baselineVersion = 2, int $currentVersion = 2): CommandTester
     {
@@ -867,13 +1008,20 @@ final class MessageCheckCommandTest extends TestCase
 
     /**
      * @param  array<string, array{class: string, version: int, replaces: list<string>}>  $events
+     * @param  array<string, array{class: string, replaces: list<string>}>|null  $commands  null leaves the
+     *                                                                                      section out
      */
-    private function catalogue(array $events, ?int $schemaVersion = null): string
+    private function catalogue(array $events, ?int $schemaVersion = null, ?array $commands = null): string
     {
-        return $this->file((string) json_encode([
+        $document = [
             'schema_version' => $schemaVersion ?? CatalogueCompatibility::SCHEMA_VERSION,
             'events' => (object) $events,
-        ]));
+        ];
+        if ($commands !== null) {
+            $document['commands'] = (object) $commands;
+        }
+
+        return $this->file((string) json_encode($document));
     }
 
     private function file(string $contents): string
@@ -892,5 +1040,14 @@ final class MessageCheckCommandTest extends TestCase
     private function entry(): array
     {
         return ['class' => 'App\Order\OrderPlaced', 'version' => 1, 'replaces' => []];
+    }
+
+    /**
+     * @param  list<string>  $replaces
+     * @return array{class: string, replaces: list<string>}
+     */
+    private function command(array $replaces = []): array
+    {
+        return ['class' => 'App\Billing\Charge', 'replaces' => $replaces];
     }
 }
